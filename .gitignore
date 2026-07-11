@@ -32,6 +32,16 @@ model_ts*.txt
 .idea
 .vscode
 _darcs
+
+# Local AI-agent instructions and workspace metadata
+/.agents/
+/.claude/
+/.codex/
+/.cursor/
+/AGENTS.md
+/CLAUDE.md
+/hpp_sam/utils/_plan_mode_test.txt
+
 /pretrained
 /data/
 /logs/
