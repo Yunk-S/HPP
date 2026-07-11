@@ -1,0 +1,55 @@
+# DeepSpeed ZeRO-3 + NVMe Offload 配置
+# 适用于: CPU 内存也不够的极端情况
+# 优势: 将参数/优化器 offload 到 NVMe SSD，CPU 内存需求大幅降低
+# 注意: 需要高速 NVMe SSD (PCIe 4.0+)
+
+{
+    "train_batch_size": 8,
+    "train_micro_batch_size_per_gpu": 1,
+    "gradient_accumulation_steps": 8,
+    "steps_per_print": 100,
+    "wall_clock_breakdown": false,
+    
+    "zero_optimization": {
+        "stage": 3,
+        "stage3_param_persistence_threshold": 10000,
+        "stage3_max_live_parameters": 100000,
+        "stage3_max_reuse_distance": 100000,
+        "stage3_prefetch_bucket_size": 10000000,
+        "reduce_bucket_size": 10000000,
+        "overlap_comm": false,
+        "contiguous_gradients": true,
+        
+        # NVMe Offload - 用于极端内存受限场景
+        "offload_optimizer": {
+            "device": "nvme",
+            "nvme_path": "/tmp/deepspeed_nvme/",
+            "pin_memory": true,
+            "buffer_count": 5,
+            "pipeline_read": true,
+            "pipeline_write": true
+        },
+        "offload_param": {
+            "device": "nvme",
+            "nvme_path": "/tmp/deepspeed_nvme/",
+            "pin_memory": true,
+            "buffer_count": 5,
+            "pipeline_read": true,
+            "pipeline_write": true
+        }
+    },
+    
+    "fp16": {
+        "enabled": false
+    },
+    
+    "bf16": {
+        "enabled": true
+    },
+    
+    "gradient_clipping": 1.0,
+    
+    "zero_allow_untested_optimizer": true,
+
+    "nccl_timeout": 300000
+}

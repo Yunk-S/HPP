@@ -1,0 +1,87 @@
+# HPP-SAM Project Metadata
+#
+# Install:
+#   pip install -e .
+#
+# For full GPU training, additionally install:
+#   # torkit3d (point cloud ops, from git submodule)
+#   git submodule update --init third_party/torkit3d
+#   FORCE_CUDA=1 pip install third_party/torkit3d
+#
+#   # apex (fused layer norm for speed; optional on CPU-only)
+#   git submodule update --init third_party/apex
+#   pip install -v --disable-pip-version-check --no-cache-dir \
+#     --config-settings "--build-option=--cpp_ext" \
+#     --config-settings "--build-option=--cuda_ext" third_party/apex
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hpp-sam"
+version = "0.1.0"
+description = "HPP-SAM: Hyperbolic Point Prompt Segment Anything Model for 3D Point Cloud Segmentation"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [
+    {name = "HPP-SAM Authors"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.1.0",
+    "torchvision>=0.16.0",
+    # Giant: eva_giant_patch14_224；Large: eva02_base_patch14_448（在 hpp_memory_efficient.yaml 中覆盖）—均需较新 timm
+    "timm>=1.0.3",
+    "hydra-core>=1.3.0",
+    "omegaconf>=2.3.0",
+    "accelerate>=0.25.0",
+    "datasets>=2.14.0",
+    "numpy>=1.24.0",
+    "safetensors>=0.4.0",
+    "scipy>=1.10.0",
+    "wandb>=0.15.0",
+    "einops>=0.7.0",
+    "triton>=2.1.0; platform_system=='Linux'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+torkit3d = [
+    # Install from the submodule under third_party/torkit3d
+    # git submodule update --init third_party/torkit3d
+    # FORCE_CUDA=1 pip install third_party/torkit3d
+]
+apex = [
+    # Install apex from submodule for FusedLayerNorm speedup
+    # git submodule update --init third_party/apex
+    # pip install -v --disable-pip-version-check --no-cache-dir \
+    #   --config-settings "--build-option=--cpp_ext" \
+    #   --config-settings "--build-option=--cuda_ext" third_party/apex
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/hpp-sam"
+Paper = "https://arxiv.org/abs/XXXX.XXXXX"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hpp_sam*"]
+
+[tool.setuptools.package-data]
+hpp_sam = ["py.typed"]

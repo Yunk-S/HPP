@@ -1,0 +1,14 @@
+_target_: hpp_sam.model.loss.Criterion
+
+# Radius regularization to prevent HRA collapse
+# Higher weight = stricter regularization on radius deviation from target
+radius_reg_weight: 0.01
+
+# Target mean radius for regularization
+# For Poincaré ball with curvature=0.01, radius ~1.0 is near origin boundary
+radius_target_mean: 1.0
+
+# Radius diversity loss weight
+# Encourages different prompts to have different radii (varied granularity)
+# Set to 0 to disable
+radius_diversity_weight: 0.005

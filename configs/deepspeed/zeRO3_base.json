@@ -1,0 +1,36 @@
+# DeepSpeed ZeRO-3 配置模板
+# 本文件由 train.py 自动生成和读取
+# 如需自定义修改，请在 configs/deepspeed/ 目录下创建新的配置文件
+
+{
+    "train_batch_size": 8,
+    "train_micro_batch_size_per_gpu": 1,
+    "gradient_accumulation_steps": 8,
+    "steps_per_print": 100,
+    "wall_clock_breakdown": false,
+    
+    "zero_optimization": {
+        "stage": 3,
+        "stage3_param_persistence_threshold": 100000,
+        "stage3_max_live_parameters": 1000000,
+        "stage3_max_reuse_distance": 1000000,
+        "stage3_prefetch_bucket_size": 50000000,
+        "reduce_bucket_size": 50000000,
+        "overlap_comm": false,
+        "contiguous_gradients": true
+    },
+    
+    "fp16": {
+        "enabled": false
+    },
+    
+    "bf16": {
+        "enabled": true
+    },
+    
+    "gradient_clipping": 1.0,
+    
+    "zero_allow_untested_optimizer": true,
+
+    "nccl_timeout": 300000
+}

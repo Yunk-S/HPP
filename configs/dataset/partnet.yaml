@@ -1,0 +1,21 @@
+# PartNet (local HuggingFace datasets.save_to_disk directory)
+# Override with env HPP_PARTNET_PATH or Hydra: dataset.path=/abs/path
+dataset:
+  path: ${oc.env:HPP_PARTNET_PATH,./data/partnet}
+  split: train
+  keep_in_memory: false
+transforms:
+  - _target_: hpp_sam.datasets.transforms.NormalizePoints
+  - _target_: hpp_sam.datasets.transforms.NormalizeColor
+    mean: 0.5
+    std: 0.5
+  - _target_: hpp_sam.datasets.transforms.RandomSampleMask
+    num_samples: 2
+  - _target_: hpp_sam.datasets.transforms.RandomSample
+    num_samples: ${num_samples}
+  - _target_: hpp_sam.datasets.transforms.RandomScale
+    low: 0.8
+    high: 1.0
+  - _target_: hpp_sam.datasets.transforms.RandomRotatePerbuate
+  - _target_: hpp_sam.datasets.transforms.RandomRotateAlongAxis
+  - _target_: hpp_sam.datasets.transforms.ToTensor

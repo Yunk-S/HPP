@@ -1,0 +1,112 @@
+# HPP-SAM Training Configuration
+#
+# Full training config for Hyperbolic Point Prompt SAM
+# Uses Hydra for configuration management
+#
+# Dataset auto-detection: if a dataset path doesn't exist, it's skipped automatically
+
+defaults:
+  - model@model: hpp
+  - dataset@train_dataset: partnet+partnext
+  - dataset@val_dataset: partnext_val
+  - loss: default
+  - _self_
+
+# Global variables
+num_samples: 10000
+
+# Training dataloader (optimized for large VRAM / multi-GPU)
+train_dataloader:
+  batch_size: 1  # Start with 1; increase once you verify memory fits with bf16 + gradient checkpointing
+  num_workers: 4  # Reduced from 8 to lower dataloader overhead during tuning
+  shuffle: true
+  drop_last: true
+  pin_memory: true  # Accelerate CPU-GPU data transfer
+
+# Validation settings
+val_freq: 5
+val_dataloader:
+  batch_size: 4
+  num_workers: 4
+  shuffle: false
+  drop_last: false
+  pin_memory: true
+
+# Optimizer settings
+lr: 3e-4
+weight_decay: 0.1
+max_grad_value: 1.0
+gradient_accumulation_steps: 8  # Effective batch = 1 * 8 = 8; keeps grad stats comparable to batch_size=8
+save_freq: 5
+
+# Learning rate scheduler — cosine with warmup (smoother than step-based)
+scheduler:
+  _target_: hpp_sam.optim.lr_scheduler.WarmupMultiStepLR
+  milestones: [400000, 500000]
+  warmup_iters: 3000
+  warmup_factor: 0.001
+  gamma: 0.1
+
+# Pretrained checkpoint (set null for default EVA giant backbone unless you provide a compatible mapped checkpoint)
+pretrained_ckpt_path: null
+
+# Training limits
+max_epochs: 10000
+max_steps: 5000000
+seed: 42
+
+# 死锁/挂起诊断（也可用环境变量，见 train.py 启动提示）
+# HPP_HANG_DEBUG=1 仅前 hang_debug_first_batches 个 batch 打印全链路；=2 每个 batch；HPP_HANG_DEBUG_SYNC=1 探针处 cuda 同步（慢）
+hang_debug: 0
+hang_debug_first_batches: 5
+hang_debug_cuda_sync: false
+
+# Mixed precision training
+# bf16: preferred on Ampere+ (A100, RTX 3090/4090); better dynamic range than fp16
+# fp16: fallback for older hardware
+# 'no': disable mixed precision (debugging only)
+mixed_precision: bf16
+
+# FSDP — PyTorch 显存均摊（FULL_SHARD = 参数 + 梯度 + 优化器状态 均分到每张卡）
+# 注意: FSDP 在 CPU 内存管理方面不如 DeepSpeed 精细，如果 FSDP 会爆 CPU 内存，请使用 DeepSpeed
+fsdp:
+  enabled: false  # 已弃用，推荐使用 DeepSpeed
+  cpu_offload_optimizer: false
+  backward_prefetch: backward_pre
+  forward_prefetch: true
+
+# ========== DeepSpeed ZeRO-3 配置 (推荐) ==========
+# DeepSpeed ZeRO-3 比 FSDP 有更精细的 CPU 内存管理：
+# 1. DeepSpeedCPUAdam 比 PyTorch CPU offload 快 5-7x
+# 2. 支持 NVMe offload (ZeRO-Infinity)
+# 3. 更好的通信重叠
+#
+# 重要优化 (解决 ZeRO-3 hang 问题):
+# - overlap_comm: false (禁用通信计算重叠，避免死锁)
+# - 减小 stage3_max_live_parameters 和 stage3_max_reuse_distance (减少 GPU 显存峰值)
+# - 减小 reduce_bucket_size 和 stage3_prefetch_bucket_size (减少 NCCL 数据传输量)
+# - round_robin_gradient_partition 和 round_robin_weights (更均衡的参数分配)
+# - nccl_timeout: 600000 (10分钟超时，允许慢速操作完成)
+deepspeed:
+  enabled: true
+  stage: 3
+  offload_optimizer: true  # CPU offload 优化器状态
+  offload_param: false
+  offload_optimizer_device: cpu
+  offload_param_device: cpu
+  overlap_comm: false  # 禁用通信计算重叠 - 关键优化！
+  contiguous_gradients: true
+  reduce_bucket_size: 10000000  # 减小以减少 NCCL 数据传输
+  stage3_max_live_parameters: 500000  # 减小以减少 GPU 显存峰值
+  stage3_max_reuse_distance: 500000  # 减小以更快释放参数分片
+  stage3_param_persistence_threshold: 100000
+  stage3_prefetch_bucket_size: 10000000  # 减小以减少预取开销
+
+# Logging settings (wandb)
+run_name: hpp_sam_partnet_partnext
+project_dir: "./logs/${run_name}"
+log_with: wandb
+project_name: hpp-sam
+
+# Visualization frequency (in steps)
+vis_freq: 500

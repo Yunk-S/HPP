@@ -1,0 +1,19 @@
+# PartNeXt Validation Dataset Configuration for HPP-SAM
+#
+# Uses the test split converted from PartNeXt dataset.
+# See partnext.yaml for conversion instructions.
+
+path: ./data/partnext/dataset
+split: test
+
+keep_in_memory: false
+
+transforms:
+  - _target_: hpp_sam.datasets.transforms.Compose
+    transforms:
+      - _target_: hpp_sam.datasets.transforms.NormalizePoints
+      - _target_: hpp_sam.datasets.transforms.NormalizeFeatures
+      - _target_: hpp_sam.datasets.transforms.FilterInvalidMasks
+        min_points: 16
+      - _target_: hpp_sam.datasets.transforms.RandomSamplePoints
+        num_points: ${num_samples}

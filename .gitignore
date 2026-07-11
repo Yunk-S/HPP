@@ -1,0 +1,67 @@
+.nfs*
+
+# compilation and distribution
+__pycache__
+_ext
+*.pyc
+*.pyd
+*.so
+*.dll
+*.egg-info/
+build/
+dist/
+wheels/
+
+# pytorch/python/numpy formats
+*.pth
+*.pkl
+*.npy
+*.ts
+model_ts*.txt
+
+# Checkpoitns
+*.safetensors
+
+# Editor temporaries
+*.swn
+*.swo
+*.swp
+*~
+
+# editor settings
+.idea
+.vscode
+_darcs
+/pretrained
+/data/
+/logs/
+.gitnexus
+
+# OS and shell artifacts
+%USERPROFILE%
+${USERPROFILE}
+/%USERPROFILE%
+/c/Users/
+C:/Users/
+/mnt/
+.DS_Store
+Thumbs.db
+
+# Deprecated/unused configs (deleted from project)
+configs/dataset/fusion360.yaml
+configs/dataset/ground_truth.yaml
+configs/dataset/mixture.yaml
+configs/dataset/partnet+scannet.yaml
+configs/dataset/partnet+shapenet+scannet.yaml
+configs/dataset/partnet+shapenet.yaml
+configs/dataset/partnet_mobility.yaml
+configs/dataset/scannet.yaml
+configs/dataset/scannet_block.yaml
+configs/dataset/shapenet.yaml
+configs/model/voronoi.yaml
+configs/model/voronoi_giant.yaml
+configs/voronoi_giant.yaml
+configs/voronoi_large.yaml
+demo/
+scripts/train_voronoi_large.sh
+setup.py

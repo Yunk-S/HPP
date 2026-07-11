@@ -1,0 +1,2 @@
+# Slurm/Linux require LF in batch and shell scripts (no CRLF).
+*.sh text eol=lf

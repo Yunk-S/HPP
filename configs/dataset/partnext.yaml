@@ -1,0 +1,30 @@
+# PartNeXt Dataset Configuration for HPP-SAM
+#
+# Dataset source: PartNeXt (NeurIPS 2025)
+# - 23,519 textured 3D models
+# - 50 object categories
+# - 350,187 annotated instances
+# - Fine-grained, hierarchical part labels
+#
+# Convert with (超算平台):
+#   python convert_partnext.py \
+#     --glb_root /gpfs/work/aac/yunkunshi23/PartNeXt/dataTransform/PartNeXt_mesh/glbs \
+#     --json_root /gpfs/work/aac/yunkunshi23/PartNeXt/dataTransform/PartNeXt_raw_json \
+#     --output ./data/partnext \
+#     --num_points 10000 \
+#     --num_proc 32
+
+path: ./data/partnext/dataset
+split: train
+
+keep_in_memory: false
+
+transforms:
+  - _target_: hpp_sam.datasets.transforms.Compose
+    transforms:
+      - _target_: hpp_sam.datasets.transforms.NormalizePoints
+      - _target_: hpp_sam.datasets.transforms.NormalizeFeatures
+      - _target_: hpp_sam.datasets.transforms.FilterInvalidMasks
+        min_points: 16
+      - _target_: hpp_sam.datasets.transforms.RandomSamplePoints
+        num_points: ${num_samples}

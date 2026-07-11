@@ -1,0 +1,48 @@
+# DeepSpeed ZeRO-3 + CPU Offload 配置
+# 适用于: FSDP CPU 内存爆掉的情况
+# 优势: DeepSpeedCPUAdam 比 PyTorch FSDP CPU offload 更高效 (快 5-7x)
+
+{
+    "train_batch_size": 8,
+    "train_micro_batch_size_per_gpu": 1,
+    "gradient_accumulation_steps": 8,
+    "steps_per_print": 100,
+    "wall_clock_breakdown": false,
+    
+    "zero_optimization": {
+        "stage": 3,
+        "stage3_param_persistence_threshold": 100000,
+        "stage3_max_live_parameters": 1000000,
+        "stage3_max_reuse_distance": 1000000,
+        "stage3_prefetch_bucket_size": 50000000,
+        "reduce_bucket_size": 50000000,
+        "overlap_comm": false,
+        "contiguous_gradients": true,
+        
+        # CPU Offload - 这是关键区别！
+        "offload_optimizer": {
+            "device": "cpu",
+            "pin_memory": true,
+            "ratio": 1.0
+        },
+        "offload_param": {
+            "device": "cpu",
+            "pin_memory": true,
+            "ratio": 1.0
+        }
+    },
+    
+    "fp16": {
+        "enabled": false
+    },
+    
+    "bf16": {
+        "enabled": true
+    },
+    
+    "gradient_clipping": 1.0,
+    
+    "zero_allow_untested_optimizer": true,
+
+    "nccl_timeout": 300000
+}

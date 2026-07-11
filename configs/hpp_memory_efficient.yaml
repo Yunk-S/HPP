@@ -1,0 +1,167 @@
+# HPP-SAM — Ultra Memory-Efficient Configuration
+#
+# 这个配置针对 80GB GPU 显存优化，通过以下技术降低显存占用:
+# 1. CPU Activation Offload: 激活值保存到CPU内存
+# 2. 更激进的梯度检查点策略
+# 3. 更小的chunk_size减少峰值显存
+# 4. 更大的gradient_accumulation_steps
+# 5. 减小num_samples减少输入大小
+#
+# 预计显存节省: 40-60%，速度约慢20-30%
+
+defaults:
+  - model@model: hpp
+  - dataset@train_dataset: partnet+partnext
+  - dataset@val_dataset: partnext_val
+  - loss: default
+  - _self_
+
+# 使用 EVA02 Base backbone（替换 Giant）
+pc_encoder:
+  transformer:
+    model_name: eva02_base_patch14_448
+    pretrained: false
+
+# ========== 输入优化 ==========
+# DDP 每卡整模；HPP 比 Point-SAM 多 HRA + 多轮 prompt。4096 易 OOM，再降一档更稳。
+num_samples: 3072
+
+train_dataloader:
+  batch_size: 1
+  num_workers: 4
+  shuffle: true
+  drop_last: true
+  persistent_workers: true
+
+val_freq: 5
+val_dataloader:
+  batch_size: 4  # 验证集也降低batch size
+  num_workers: 4
+  shuffle: false
+  drop_last: false
+  pin_memory: true
+
+# ========== 学习率和优化器 ==========
+lr: 3e-4
+weight_decay: 0.1
+max_grad_value: 1.0
+
+# 过大 accumulation 会在 optimizer.step 边界拉高峰值；DDP 下建议 8~16
+gradient_accumulation_steps: 16
+
+# ========== 断点续传 ==========
+batch_save_freq: 50
+save_freq: 5
+
+# ========== 学习率调度 ==========
+scheduler:
+  _target_: hpp_sam.optim.lr_scheduler.WarmupMultiStepLR
+  milestones: [400000, 500000]
+  warmup_iters: 3000
+  warmup_factor: 0.001
+  gamma: 0.1
+
+pretrained_ckpt_path: null
+
+# ========== 训练配置 ==========
+max_epochs: 10000
+max_steps: 5000000
+seed: 42
+
+# ========== 混合精度 ==========
+mixed_precision: bf16
+
+# ========== CUDA错误处理 ==========
+skip_cuda_error_batches: true
+max_consecutive_cuda_skips: 32
+# OOM/非法参数后建议同步，便于定位真实 kernel（略慢）
+cuda_sync_after_step: true
+
+# ========== FSDP配置 (已弃用，推荐使用 DeepSpeed) ==========
+# 显存优化用 FSDP；上游 Point-SAM 仅用 DDP（无 FSDP）。
+# FSDP + bf16 + gradient checkpointing 组合在部分 GPU 型号上触发异步 CUDA illegal memory access。
+# 
+# ⚠️ 推荐使用 DeepSpeed ZeRO-3，它有更精细的 CPU 内存管理。
+# DeepSpeed 配置通过 deepspeed.enabled: true 启用。
+fsdp:
+  enabled: false  # 已弃用，推荐使用 DeepSpeed
+  cpu_offload_optimizer: false
+
+# ========== DeepSpeed ZeRO-3 配置 (推荐) ==========
+# ZeRO-3 防死锁：overlap_comm=false；勿开 mask/patch/decoder 的 gradient checkpoint；勿用 PatchEncoder split。
+# 1. DeepSpeedCPUAdam 比 PyTorch CPU offload 快 5-7x
+# 2. 支持 NVMe offload (ZeRO-Infinity)
+# 3. 更好的通信重叠
+#
+# 可选配置:
+#   - stage: ZeRO 阶段 (2 或 3)
+#   - offload_optimizer: 将优化器状态 offload 到 CPU
+#   - offload_param: 将参数 offload 到 CPU
+deepspeed:
+  enabled: true
+  stage: 3
+  offload_optimizer: false  # 禁用（需 GCC 9+ 编译 DeepSpeedCPUAdam；节点 GCC 版本不足）
+  offload_param: false  # 极端 OOM 可设 true
+  offload_optimizer_device: cpu
+  offload_param_device: cpu
+  overlap_comm: false  # 关闭通信与计算重叠
+  contiguous_gradients: true
+  reduce_bucket_size: 50000000
+  stage3_max_live_parameters: 500000
+  stage3_max_reuse_distance: 500000
+  stage3_param_persistence_threshold: 100000
+  stage3_prefetch_bucket_size: 25000000
+
+# ========== 模型配置 ==========
+model:
+  _target_: hpp_sam.model.hyperpoint_sam.HPPSAM
+  # 勿与 mask_encoder/mask_decoder 内 gradient checkpoint 同用 save_on_cpu（会 invalid arg）
+  use_cpu_offload: false
+  # 每轮迭代整段 forward；10 轮显存高于 3，但 IoU@10 / mIoU 等 benchmark 指标需要 prompt_iters>=10。
+  prompt_iters: 10
+
+  # Decoder梯度检查点优化（ZeRO-3 + checkpoint 组合曾导致死锁，已禁用）
+  mask_decoder:
+    use_gradient_checkpointing: false
+    transformer:
+      depth: 4
+      embedding_dim: 256
+      num_heads: 8
+      mlp_dim: 2048
+      use_hyperbolic_cross_attn: true
+      curvature: 0.01
+      use_gradient_checkpointing: false  # ZeRO-3：HyperCrossAttention 内 checkpoint 易与 hook 死锁
+      # 双曲测地距离里会 clone expand 中间张量；32 比 64 峰值更低（更慢）。OOM 仍发生时再考虑 16。
+      q_chunk_size: 32
+      k_chunk_size: 32
+      chunk_size: 32
+      use_ball_query: true
+      k_neighbors: 32
+
+  # Encoder梯度检查点优化（ZeRO-3 + checkpoint 组合曾导致死锁，已禁用）
+  pc_encoder:
+    patch_embed:
+      use_gradient_checkpointing: false
+
+  mask_encoder:
+    use_gradient_checkpointing: false
+
+# HRA参数
+hra_curvature: 0.01
+hra_type: block_diagonal
+block_size: 8
+tau_min: 0.1
+tau_max: 2.0
+
+run_name: hpp_sam_memory_efficient
+project_dir: "./logs/${run_name}"
+log_with: wandb
+project_name: hpp-sam
+
+vis_freq: 500
+
+# ========== PyTorch显存管理 ==========
+# 在train.py中设置的环境变量
+env:
+  # expandable_segments:True 与 use_reentrant=False 的 checkpoint 在 FSDP 下触发 CUDACachingAllocator 内部断言
+  PYTORCH_CUDA_ALLOC_CONF: "max_split_size_mb:512"

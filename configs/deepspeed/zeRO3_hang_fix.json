@@ -1,0 +1,43 @@
+# DeepSpeed ZeRO-3 优化配置 (针对 hang/deadlock 问题)
+#
+# 关键优化点：
+# 1. 减小 stage3_max_live_parameters - 减少同时在 GPU 上的参数数量
+# 2. 减小 stage3_max_reuse_distance - 更快释放参数分片
+# 3. 减小 reduce_bucket_size - 减少 NCCL collective 操作的数据量
+# 4. 禁用 overlap_comm - 避免通信与计算重叠导致的死锁
+# 5. 设置较长的 nccl_timeout - 允许更长的等待时间
+
+{
+    "train_batch_size": 8,
+    "train_micro_batch_size_per_gpu": 1,
+    "gradient_accumulation_steps": 8,
+    "steps_per_print": 100,
+    "wall_clock_breakdown": false,
+    
+    "zero_optimization": {
+        "stage": 3,
+        "stage3_param_persistence_threshold": 100000,
+        "stage3_max_live_parameters": 500000,
+        "stage3_max_reuse_distance": 500000,
+        "stage3_prefetch_bucket_size": 10000000,
+        "reduce_bucket_size": 10000000,
+        "overlap_comm": false,
+        "contiguous_gradients": true,
+        "round_robin_gradient_partition": true,
+        "round_robin_weights": true
+    },
+    
+    "fp16": {
+        "enabled": false
+    },
+    
+    "bf16": {
+        "enabled": true
+    },
+    
+    "gradient_clipping": 1.0,
+    
+    "zero_allow_untested_optimizer": true,
+    
+    "nccl_timeout": 600000
+}

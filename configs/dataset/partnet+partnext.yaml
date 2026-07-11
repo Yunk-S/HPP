@@ -1,0 +1,9 @@
+defaults:
+  - partnet@dataset_dict.partnet
+  - partnext@dataset_dict.partnext
+
+# 配置说明:
+# - 如果 PartNet 数据不存在，build_datasets() 会自动跳过
+# - 如果 PartNeXt 数据不存在，会自动跳过
+# - 至少需要一个数据集可用才能训练
+# - 确保 datasets/partnet.yaml 和 datasets/partnext.yaml 存在

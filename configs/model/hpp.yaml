@@ -1,0 +1,67 @@
+# HPP-SAM (Hyperbolic Point Prompt SAM) — Giant 骨干（默认 `configs/hpp.yaml`）
+#
+# 省显存请用: `configs/hpp_memory_efficient.yaml` + `python train.py --config hpp_memory_efficient`
+#
+# Core innovations:
+# 1. HyperPromptBranch: Hyperbolic Radius Adjustment (HRA)
+# 2. Radius-conditioned hyperbolic cross-attention in decoder
+# 3. Mixed-manifold: Euclidean encoder + hyperbolic decoder interaction
+#
+# Backbone: EVA Giant (224), available in upstream timm.
+
+_target_: hpp_sam.model.hyperpoint_sam.HPPSAM
+pc_encoder:
+  _target_: hpp_sam.model.point_cloud_encoder.PointCloudEncoder
+  patch_embed:
+    _target_: hpp_sam.model.point_cloud_encoder.PatchEmbed
+    in_channels: 6
+    out_channels: 512
+    num_patches: 1024
+    patch_size: 256
+    radius: null
+    centralize_features: false
+  transformer:
+    _target_: timm.create_model
+    model_name: eva_giant_patch14_224
+    pretrained: false
+  embed_dim: 256
+mask_encoder:
+  _target_: hpp_sam.model.prompt_encoder.MaskEncoder
+  embed_dim: 256
+  in_channels: 4
+  radius: null
+  centralize_features: false
+mask_decoder:
+  _target_: hpp_sam.model.mask_decoder.MaskDecoder
+  transformer_dim: 256
+  curvature: ${..hra_curvature}
+  use_gradient_checkpointing: false
+  transformer:
+    _target_: hpp_sam.model.transformer.TwoWayTransformer
+    depth: 4
+    embedding_dim: 256
+    num_heads: 8
+    mlp_dim: 2048
+    use_hyperbolic_cross_attn: true
+    curvature: 0.01
+    use_gradient_checkpointing: false
+    # 显存优化参数:
+    # - q_chunk_size: query维度的分块大小，默认256
+    # - k_chunk_size: key维度的分块大小，默认256，用于两级分块策略
+    # - chunk_size: 兼容旧参数
+    q_chunk_size: 128
+    k_chunk_size: 128
+    chunk_size: 128
+    # Ball Query 参数（核心显存优化）:
+    # - use_ball_query: 启用 Ball Query 注意力，用局部邻域替代全局注意力
+    # - k_neighbors: 每个 query 的邻居数量，默认64（平衡质量和显存）
+    use_ball_query: true
+    k_neighbors: 64
+# Interactive clicks: IoU@1..IoU@10 need >=10 rounds (Point-SAM / PartNeXt tables)
+prompt_iters: 10
+
+hra_curvature: 0.01
+hra_type: block_diagonal
+block_size: 8
+tau_min: 0.1
+tau_max: 2.0
