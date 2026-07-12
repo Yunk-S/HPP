@@ -76,3 +76,5 @@ configs/voronoi_large.yaml
 demo/
 scripts/train_voronoi_large.sh
 setup.py
+
+修复检查.md
