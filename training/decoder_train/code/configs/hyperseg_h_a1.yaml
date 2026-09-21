@@ -1,9 +1,11 @@
-normalization: unit-sphere
+normalization: official-decoder
+backbone_normalization: official-encoder
 model:
   model_variant: hyperseg-h
   control_signal: scale-proxy
   hierarchy_enabled: false
-  compatibility_mode: batch-first-corrected
+  compatibility_mode: official-compatibility
+  prompt_propagation: false
   feature_dim: 448
   hidden_dim: 384
   hyper_dim: 32
@@ -18,6 +20,7 @@ model:
   cone_k: 0.1
   beta: 5.0
 loss:
+  seg_loss_mode: official_adaptive
   bce_weight: 0.7
   dice_weight: 0.3
   contain_weight: 0.1

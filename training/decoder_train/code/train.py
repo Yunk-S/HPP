@@ -157,11 +157,21 @@ class HyperSegTrainer:
     def predict_levels(self, batch):
         outputs, energies = [], []
         features = batch.get('features')
+        backbone_points = batch.get('backbone_points')
         if features is None and self.model.backbone is not None:
-            features = self.model.backbone(batch['points'])
+            features = self.model.backbone(backbone_points if backbone_points is not None else batch['points'])
         controls = batch['granularities'] if self.model.control_signal == 'hierarchy' else batch['scales']
+        enhanced = None
+        if self.model.encoder_is_control_invariant:
+            # HyperSeg-H does not FiLM-condition the enhancer.  Compute the
+            # O(N^2) point encoder once and reuse it for every hierarchy level.
+            enhanced = self.model.encode_features(batch['points'], features, backbone_points=backbone_points)
         for level in range(controls.shape[1]):
-            pred, aux = self.model(batch['points'], batch['prompt_indices'], controls[:, level], features, True)
+            if enhanced is None:
+                pred, aux = self.model(batch['points'], batch['prompt_indices'], controls[:, level], features, True)
+            else:
+                pred, aux = self.model.decode_features(
+                    enhanced, batch['prompt_indices'], controls[:, level], True)
             outputs.append(pred)
             if 'energy' in aux:
                 energies.append(aux['energy'])
@@ -169,7 +179,10 @@ class HyperSegTrainer:
         if self.track != 'A1' and self.objective.weights[-1] > 0:
             for level in range(controls.shape[1] - 1):
                 control = (controls[:, level] + controls[:, level + 1]) / 2
-                middle.append(self.model(batch['points'], batch['prompt_indices'], control, features))
+                if enhanced is None:
+                    middle.append(self.model(batch['points'], batch['prompt_indices'], control, features))
+                else:
+                    middle.append(self.model.decode_features(enhanced, batch['prompt_indices'], control))
         return (torch.stack(outputs, 1), torch.stack(energies, 1) if energies else None,
                 torch.stack(middle, 1) if middle else None)
 

@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """CPU/CUDA synthetic regression suite. No real benchmark/SOTA claim."""
-import importlib
 import json
 import subprocess
 import sys
 import tempfile
-import types
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 import numpy as np
 import torch
@@ -19,9 +18,10 @@ from decoder.models.CrossAttentionDecoder import Decoder, CrossAttentionPointsQ
 from decoder.models.PointFeatureEnhancer import PointFeatureEnhancer
 from hyperseg_h.model import HyperSegH
 from hyperseg_h.checkpoint import audit_load, load_checkpoint, load_official, save_checkpoint
-from hyperseg_h.data import (unit_sphere, boundary_prompt, leaf_stratified_sample, validate_cache,
+from hyperseg_h.data import (unit_sphere, official_encoder_normalize, official_decoder_normalize,
+    boundary_prompt, leaf_stratified_sample, validate_cache,
     HierarchyDataset, ObjectBalancedSampler, collate_hierarchy, exclude_overlap)
-from hyperseg_h.losses import HierarchyLoss, containment_loss, geometric_loss
+from hyperseg_h.losses import HierarchyLoss, adaptive_bce_dice, containment_loss, geometric_loss
 
 
 def options(**kw):
@@ -97,33 +97,31 @@ class SmokeTests(unittest.TestCase):
         gate = torch.linspace(0, 1, 17).expand(2, -1)
         torch.testing.assert_close(layer(x, prompt, gate), regular * gate[..., None])
         decoder = Decoder(24, 4, num_layers=3, gate_aware=True).eval()
-        expected, updated_prompt = x, prompt
+        expected = x
         for block in decoder.decoder_blocks:
-            expected, updated_prompt = block(expected, updated_prompt, gate, return_prompt=True)
+            expected, _ = block(expected, prompt, gate, return_prompt=True)
         torch.testing.assert_close(decoder(x, prompt, gate), expected)
+        propagated = Decoder(24, 4, num_layers=3, gate_aware=True,
+                             prompt_propagation=True).eval()
+        expected, updated_prompt = x, prompt
+        for block in propagated.decoder_blocks:
+            expected, updated_prompt = block(expected, updated_prompt, gate, return_prompt=True)
+        torch.testing.assert_close(propagated(x, prompt, gate), expected)
         self.assertFalse(torch.allclose(updated_prompt, prompt))
 
-    def test_original_numerical_compatibility(self):
-        # Load baseline source directly from repository HEAD, without changing files.
-        for name, ctor, args in [
-            ('PointFeatureEnhancer', 'PointFeatureEnhancer', dict(feature_dim=12, feature_proj_dim=24,
-              pos_num_feats=8, transformer_hidden_dim=24, transformer_num_heads=4,
-              transformer_num_layers=2, dropout=0.)),
-            ('CrossAttentionDecoder', 'Decoder', dict(dim=24, num_heads=4, num_layers=3))]:
-            source = subprocess.check_output(['git', 'show', f'HEAD:decoder/models/{name}.py'], cwd=ROOT, text=True)
-            baseline_module = types.ModuleType('decoder.models._baseline_' + name)
-            baseline_module.__package__ = 'decoder.models'
-            exec(compile(source, name, 'exec'), baseline_module.__dict__)
-            original = getattr(baseline_module, ctor)(**args).eval()
-            current = getattr(importlib.import_module('decoder.models.' + name), ctor)(**args).eval()
-            current.load_state_dict(original.state_dict(), strict=True)
-            if ctor == 'Decoder':
-                inputs = (torch.randn(2, 13, 24), torch.randn(2, 1, 24))
-            else:
-                inputs = (torch.randn(2, 13, 12), torch.randn(2, 13, 3), None, torch.tensor([.1, .8]))
-            torch.testing.assert_close(current(*inputs), original(*inputs), rtol=0, atol=0)
-            shared = importlib.import_module('training.decoder_train.code.models.' + name)
-            self.assertIs(getattr(shared, ctor), getattr(importlib.import_module('decoder.models.' + name), ctor))
+    def test_official_compatibility_mode_is_explicit(self):
+        enhancer = PointFeatureEnhancer(
+            feature_dim=12, feature_proj_dim=24, pos_num_feats=8,
+            transformer_hidden_dim=24, transformer_num_heads=4,
+            transformer_num_layers=2, dropout=0.,
+            compatibility_mode='official-compatibility')
+        self.assertFalse(enhancer.transformer_blocks[0].attn.batch_first)
+        decoder = Decoder(24, 4, num_layers=3, gate_aware=False)
+        with self.assertRaises(ValueError):
+            decoder(torch.randn(1, 3, 24), torch.randn(1, 1, 24),
+                    gates=torch.ones(1, 3))
+        # Numerical parity against upstream is intentionally a separate,
+        # pinned-checkout test: scripts/check_official_compatibility.py.
 
     def test_corrected_batch_independence(self):
         model = HyperSegH(**options()).eval()
@@ -132,6 +130,26 @@ class SmokeTests(unittest.TestCase):
         full = model(x, idx, control, f)
         single = torch.cat([model(x[i:i+1], idx[i:i+1], control[i:i+1], f[i:i+1]) for i in range(2)])
         torch.testing.assert_close(full, single, atol=1e-6, rtol=1e-5)
+
+    def test_control_invariant_encoding_is_reused(self):
+        model = HyperSegH(**options()).eval()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        trainer = __import__('training.decoder_train.code.train', fromlist=['HyperSegTrainer']).HyperSegTrainer(
+            model, optimizer, 'cpu')
+        batch = {'points': torch.randn(2, 13, 3), 'features': torch.randn(2, 13, 12),
+                 'prompt_indices': torch.tensor([0, 2]),
+                 'granularities': torch.tensor([[0., .5, 1.], [0., .5, 1.]]),
+                 'scales': torch.tensor([[1., .5, .2], [1., .5, .2]])}
+        with patch.object(model.enhancer, 'forward', wraps=model.enhancer.forward) as forward:
+            trainer.predict_levels(batch)
+            self.assertEqual(forward.call_count, 1)
+
+    def test_internal_normalization_modes(self):
+        points = torch.tensor([[0., 0., 0.], [2., 4., 8.], [1., 2., 4.]])
+        encoder = official_encoder_normalize(points)
+        decoder = official_decoder_normalize(points)
+        self.assertLessEqual(float(encoder.abs().max()), .900001)
+        torch.testing.assert_close(decoder.mean(0), torch.zeros(3), atol=1e-5, rtol=0)
 
     def test_variants_and_full_backward(self):
         for variant in ['legacy','hyperseg-h','radius-film','spherical-hierarchy']:
@@ -188,6 +206,15 @@ class SmokeTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(p.grad).all())
         all_invalid, _ = HierarchyLoss()(p,torch.ones_like(p),torch.zeros_like(valid))
         self.assertEqual(all_invalid.item(),0.)
+        sparse_target = torch.tensor([[[1., 0., 0., 0.]]])
+        sparse_prob = torch.full_like(sparse_target, .1)
+        bce, dice = adaptive_bce_dice(
+            sparse_prob, sparse_target, torch.ones_like(sparse_target, dtype=torch.bool),
+            torch.ones(1, 1, dtype=torch.bool))
+        self.assertTrue(torch.isfinite(bce) and torch.isfinite(dice))
+        self.assertEqual(HierarchyLoss().seg_loss_mode, 'official_adaptive')
+        self.assertEqual(HierarchyLoss(seg_loss_mode='per_level_adaptive').seg_loss_mode,
+                         'per_level_adaptive')
 
     def test_data_quota_prompt_and_padding(self):
         item = cache()
@@ -260,6 +287,7 @@ class SmokeTests(unittest.TestCase):
                     '--output',tmp/track,'--sweep-steps','3',*common)
                 metrics=json.loads((tmp/track/'metrics.json').read_text())
                 self.assertIn('same_point_ancestor_consistency',metrics)
+                self.assertEqual(metrics['official_interactive_iou_percent'], metrics['object_mean_iou_percent'])
                 if track=='C': self.assertEqual(len(metrics['sweep']),3)
             cli('eval','--track','A2','--checkpoint',checkpoint,'--manifest',tmp/'train.json',
                 '--output',tmp/'invalid',*common,fail=True)

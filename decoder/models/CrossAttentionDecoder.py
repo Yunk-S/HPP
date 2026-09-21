@@ -130,9 +130,13 @@ class CrossAttentionDecoder(nn.Module):
 
 class Decoder(nn.Module):
     def __init__(self, dim, num_heads, num_layers=4, mlp_ratio=4., qkv_bias=True,
-                 attn_drop=0., proj_drop=0., drop_path=0., gate_aware=False):
+                 attn_drop=0., proj_drop=0., drop_path=0., gate_aware=False,
+                 prompt_propagation=False):
         super().__init__()
         self.gate_aware = gate_aware
+        # Official behavior feeds every block the original prompt. Recurrence
+        # remains available only as an explicit ablation.
+        self.prompt_propagation = prompt_propagation
         self.decoder_blocks = nn.ModuleList([
             CrossAttentionDecoder(
                 dim=dim,
@@ -148,11 +152,14 @@ class Decoder(nn.Module):
     def forward(self, x, prompt_feat, gates=None):
         if gates is not None and not self.gate_aware:
             raise ValueError('gates require gate_aware=True')
+        block_prompt = prompt_feat
         for block in self.decoder_blocks:
             if self.gate_aware:
-                x, prompt_feat = block(x, prompt_feat, gates=gates, return_prompt=True)
+                x, updated_prompt = block(x, block_prompt, gates=gates, return_prompt=True)
+                if self.prompt_propagation:
+                    block_prompt = updated_prompt
             else:
-                x = block(x, prompt_feat)
+                x = block(x, block_prompt)
         return x
 
 
@@ -166,7 +173,8 @@ def make(cfg):
         attn_drop=cfg.decoder.attn_drop,
         proj_drop=cfg.decoder.proj_drop,
         drop_path=cfg.decoder.drop_path,
-        gate_aware=cfg.get("model_variant", "legacy") == "hyperseg-h"
+        gate_aware=cfg.get("model_variant", "legacy") in ("hyperseg-h", "spherical-hierarchy"),
+        prompt_propagation=cfg.get("prompt_propagation", False)
     ) 
 
 # Public descriptive aliases; parameter names remain checkpoint compatible.

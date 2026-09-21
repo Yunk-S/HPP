@@ -17,12 +17,14 @@ def load_config(path):
     return yaml.safe_load(Path(path).read_text())
 
 
-def make_model(config, device):
+def make_model(config, device, initialize_backbone=True):
     options = dict(config['model'])
     backbone = config.get('backbone')
     if backbone:
         from .backbone import OfficialBackbone
-        options['backbone'] = OfficialBackbone(backbone['config'], backbone['checkpoint'])
+        options['backbone'] = OfficialBackbone(
+            backbone['config'], backbone.get('checkpoint'),
+            load_checkpoint=initialize_backbone)
         options['freeze_backbone'] = backbone.get('freeze', True)
     return HyperSegH(**options).to(device)
 
@@ -36,8 +38,9 @@ def validate_protocol(config, track, num_points):
         raise ValueError('A2/C HyperSeg-H requires true hierarchy; scale proxies are forbidden')
     if track == 'C' and signal != 'hierarchy':
         raise ValueError('Track C g sweep requires explicit hierarchy control (including legacy ablation)')
-    if config.get('normalization', 'unit-sphere') != 'unit-sphere':
-        raise ValueError('Track CLI requires unit-sphere normalization')
+    if config.get('normalization', 'unit-sphere') not in (
+            'unit-sphere', 'official-decoder', 'legacy-standardize'):
+        raise ValueError('Unknown decoder normalization for track CLI')
     if num_points != 10000:
         print('NON-BENCHMARK RUN: point count differs from the 10,000-point protocol')
 
@@ -58,11 +61,18 @@ def evaluate(model, loader, device, threshold=0.7, sweep_steps=11, track='A2'):
         batch = to_device(raw, device)
         controls = batch['granularities'] if model.control_signal == 'hierarchy' else batch['scales']
         features = batch.get('features')
+        backbone_points = batch.get('backbone_points')
         if features is None and model.backbone is not None:
-            features = model.backbone(batch['points'])
+            features = model.backbone(backbone_points if backbone_points is not None else batch['points'])
+        enhanced = (model.encode_features(batch['points'], features, backbone_points=backbone_points)
+                    if model.encoder_is_control_invariant else None)
         masks = []
         for level in range(controls.shape[1]):
-            probs, aux = model(batch['points'], batch['prompt_indices'], controls[:, level], features, True)
+            if enhanced is None:
+                probs, aux = model(batch['points'], batch['prompt_indices'], controls[:, level], features, True)
+            else:
+                probs, aux = model.decode_features(
+                    enhanced, batch['prompt_indices'], controls[:, level], True)
             masks.append(probs > threshold)
             target = batch['labels'][:, level].bool()
             valid = batch['valid'][:, level]
@@ -98,7 +108,11 @@ def evaluate(model, loader, device, threshold=0.7, sweep_steps=11, track='A2'):
             previous = None
             for g in torch.linspace(0, 1, sweep_steps, device=device):
                 control = g.expand(batch['points'].shape[0])
-                probs, aux = model(batch['points'], batch['prompt_indices'], control, features, True)
+                if enhanced is None:
+                    probs, aux = model(batch['points'], batch['prompt_indices'], control, features, True)
+                else:
+                    probs, aux = model.decode_features(
+                        enhanced, batch['prompt_indices'], control, True)
                 mask = probs > threshold
                 for b in range(len(mask)):
                     row = {'model_id': batch['model_id'][b], 'g': float(g), 'mask_fraction': float(mask[b].float().mean()),
@@ -113,9 +127,11 @@ def evaluate(model, loader, device, threshold=0.7, sweep_steps=11, track='A2'):
     by_object = {}
     for row in rows:
         by_object.setdefault(row['model_id'], []).append(row['iou'])
+    object_mean = 100 * float(np.mean([np.mean(v) for v in by_object.values()]))
     return {'track': track, 'threshold': threshold,
             'target_mean_iou_percent': 100 * float(np.mean([r['iou'] for r in rows])),
-            'object_mean_iou_percent': 100 * float(np.mean([np.mean(v) for v in by_object.values()])),
+            'object_mean_iou_percent': object_mean,
+            'official_interactive_iou_percent': object_mean,
             'per_level_iou_percent': {k: 100 * float(np.mean(v)) for k, v in per_level.items()},
             'containment_violation_point_rate': containment_numerator / max(containment_denominator, 1) if pair_count else None,
             'containment_violation_pair_rate': violating_pairs / pair_count if pair_count else None,
@@ -158,6 +174,7 @@ def main(argv=None):
         print(json.dumps({'kept': len(kept), 'excluded_ids': overlap}))
         return
     config = load_config(args.config)
+    stored = None
     if not config:
         if not args.checkpoint:
             parser.error('Supply --config or a full HyperSeg-H --checkpoint')
@@ -176,7 +193,10 @@ def main(argv=None):
     if 'control_signal' not in config['model'] or 'hierarchy_enabled' not in config['model']:
         parser.error('Config must explicitly set control_signal and hierarchy_enabled')
     validate_protocol(config, args.track, args.num_points)
-    model = make_model(config, args.device)
+    if args.checkpoint and stored is None:
+        stored = torch.load(args.checkpoint, map_location='cpu', weights_only=True)
+    initialize_backbone = not (stored is not None and stored.get('format') == 'hyperseg-h-v1')
+    model = make_model(config, args.device, initialize_backbone=initialize_backbone)
     audit = []
     if args.checkpoint:
         stored = torch.load(args.checkpoint, map_location='cpu', weights_only=True)
@@ -210,8 +230,11 @@ def main(argv=None):
         overlap = set(config['training_object_ids']) & {r['model_id'] for r in records}
         if overlap:
             raise ValueError(f'Evaluation IDs overlap checkpoint training IDs: {sorted(overlap)}')
-    dataset = HierarchyDataset(records, args.num_points, hierarchy=args.track != 'A1',
-                               training=args.action == 'train', seed=args.seed)
+    dataset = HierarchyDataset(
+        records, args.num_points, hierarchy=args.track != 'A1',
+        training=args.action == 'train', seed=args.seed,
+        normalization=config.get('normalization', 'unit-sphere'),
+        backbone_normalization=config.get('backbone_normalization'))
     if args.track == 'A1':
         for record in records:
             cache = torch.load(record['cache_path'], weights_only=True, map_location='cpu')

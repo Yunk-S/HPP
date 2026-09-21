@@ -1,12 +1,13 @@
-# Keep decoder positional inputs aligned with the official S²AM3D decoder.
-# Raw-point backbones receive their own PartField normalization below.
+# High-memory A800 ablation. The main fair-comparison configs use the
+# official-compatible enhancer; this file isolates corrected batch-first
+# attention without changing the HyperSeg-H geometry or loss recipe.
 normalization: official-decoder
 backbone_normalization: official-encoder
 model:
   model_variant: hyperseg-h
   control_signal: hierarchy
   hierarchy_enabled: true
-  compatibility_mode: official-compatibility
+  compatibility_mode: batch-first-corrected
   prompt_propagation: false
   feature_dim: 448
   hidden_dim: 384
@@ -28,7 +29,7 @@ loss:
   contain_weight: 0.1
   geo_weight: 0.1
   control_weight: 0.1
-# Optional raw-point encoder (otherwise supply aligned cached features):
+# Optional raw-point encoder:
 # backbone:
 #   config: encoder/configs/final/demo.yaml
 #   checkpoint: /path/to/encoder.ckpt

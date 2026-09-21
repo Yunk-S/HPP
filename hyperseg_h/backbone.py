@@ -7,7 +7,7 @@ from .checkpoint import audit_load
 
 
 class OfficialBackbone(nn.Module):
-    def __init__(self, config_path, checkpoint_path):
+    def __init__(self, config_path, checkpoint_path=None, load_checkpoint=True):
         super().__init__()
         encoder_root = str(Path(__file__).resolve().parents[1] / 'encoder')
         if encoder_root not in sys.path:
@@ -18,10 +18,14 @@ class OfficialBackbone(nn.Module):
         cfg = _C.clone()
         cfg.merge_from_file(str(config_path))
         self.model = Model(cfg)
-        state = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
-        state = state.get('state_dict', state)
-        state = {k.removeprefix('module.').removeprefix('model.'): v for k, v in state.items()}
-        self.audit = audit_load(self.model, state, 'official_encoder')
+        self.audit = None
+        if load_checkpoint:
+            if not checkpoint_path:
+                raise ValueError('An encoder checkpoint is required for backbone initialization')
+            state = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
+            state = state.get('state_dict', state)
+            state = {k.removeprefix('module.').removeprefix('model.'): v for k, v in state.items()}
+            self.audit = audit_load(self.model, state, 'official_encoder')
         self.sample = sample_triplane_feat
 
     def forward(self, points):

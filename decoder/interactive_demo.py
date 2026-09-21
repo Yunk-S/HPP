@@ -49,7 +49,9 @@ class HyperSegHInference:
             sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parents[1]))
             from hyperseg_h.cli import make_model
             from hyperseg_h.checkpoint import load_checkpoint
-            self.hyperseg = make_model(checkpoint['config'], device)
+            self.hyperseg = make_model(
+                checkpoint['config'], device,
+                initialize_backbone=False)
             load_checkpoint(checkpoint_path, self.hyperseg)
             self.hyperseg.eval()
             self.control_signal = self.hyperseg.control_signal

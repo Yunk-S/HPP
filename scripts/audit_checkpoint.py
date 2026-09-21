@@ -23,7 +23,8 @@ def main():
         parser.error('Official checkpoints require --config')
     if stored.get('format') == 'hyperseg-h-v1' and stored['config']['model'] != config['model']:
         raise ValueError('Full checkpoint/config model settings differ')
-    model = make_model(config, args.device)
+    model = make_model(config, args.device,
+                       initialize_backbone=stored.get('format') != 'hyperseg-h-v1')
     report = load_checkpoint(args.checkpoint, model)
     result = {'checkpoint': args.checkpoint, 'modules': report,
               'new_gate_initialization': stored.get('format') != 'hyperseg-h-v1'}

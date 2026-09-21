@@ -7,16 +7,17 @@ from decoder.models.HyperbolicGeometry import EntailmentConeGate
 
 
 class HyperSegH(nn.Module):
-    """Cached official PVCNN features -> prompt-conditioned segmentation.
+    """Cached or raw-point PVCNN features -> prompt-conditioned segmentation.
 
     control_signal describes the caller's value, never inferred from its magnitude.
-    An optional backbone accepts normalized [B,N,3] and returns [B,N,feature_dim].
+    An optional backbone accepts separately normalized [B,N,3] and returns
+    [B,N,feature_dim].
     """
     def __init__(self, feature_dim=448, hidden_dim=384, hyper_dim=32, num_heads=8,
                  enhancer_layers=2, decoder_layers=4, dropout=0.1,
                  compatibility_mode='official-compatibility', model_variant='hyperseg-h',
                  control_signal='scale-proxy', hierarchy_enabled=False,
-                 backbone=None, freeze_backbone=True, **geometry):
+                 backbone=None, freeze_backbone=True, prompt_propagation=False, **geometry):
         super().__init__()
         if hidden_dim % 6 or hidden_dim % num_heads:
             raise ValueError('hidden_dim must be divisible by 6 and num_heads')
@@ -40,7 +41,8 @@ class HyperSegH(nn.Module):
             compatibility_mode=compatibility_mode)
         self.decoder = Decoder(hidden_dim, num_heads, decoder_layers, attn_drop=dropout,
                                proj_drop=dropout, drop_path=dropout,
-                               gate_aware=model_variant in ('hyperseg-h', 'spherical-hierarchy'))
+                               gate_aware=model_variant in ('hyperseg-h', 'spherical-hierarchy'),
+                               prompt_propagation=prompt_propagation)
         self.seg_head = SegHead(hidden_dim, dropout)
         self.gate = EntailmentConeGate(hidden_dim, hyper_dim, **geometry) if model_variant != 'legacy' else None
 
@@ -50,33 +52,63 @@ class HyperSegH(nn.Module):
             self.backbone.eval()
         return self
 
-    def forward(self, points, prompt_indices, control, features=None, return_aux=False):
+    @property
+    def encoder_is_control_invariant(self):
+        """Whether enhancer output can be reused for multiple controls."""
+        return self.model_variant in ('hyperseg-h', 'spherical-hierarchy')
+
+    def _validate_points(self, points, prompt_indices=None):
         if points.ndim != 3 or points.shape[-1] != 3:
             raise ValueError('points must be [B,N,3]')
         b, n, _ = points.shape
+        if prompt_indices is not None and (prompt_indices.shape != (b,) or
+                                           ((prompt_indices < 0) | (prompt_indices >= n)).any()):
+            raise ValueError('prompt_indices must be local indices [B] in [0,N)')
+        return b, n
+
+    def encode_features(self, points, features=None, control=None, backbone_points=None):
+        """Run the optional backbone and enhancer once for a point cloud.
+
+        HyperSeg-H's enhancer is independent of the hierarchy/control value,
+        allowing training and evaluation to reuse this tensor across levels.
+        ``backbone_points`` keeps raw-point encoder normalization separate from
+        decoder positional coordinates.
+        """
+        b, n = self._validate_points(points)
+        if features is None:
+            if self.backbone is None:
+                raise ValueError('Supply cached PVCNN features or an explicit backbone')
+            source_points = points if backbone_points is None else backbone_points
+            if source_points.shape != points.shape:
+                raise ValueError('backbone_points must align with points')
+            features = self.backbone(source_points)
+        if features.shape[:2] != (b, n):
+            raise ValueError('feature/point alignment mismatch')
+        if control is None and not self.encoder_is_control_invariant:
+            raise ValueError('control is required for a control-conditioned enhancer')
+        conditioning = control if self.model_variant == 'legacy' else None
+        if self.model_variant == 'radius-film' and control is not None:
+            g = 1 - control if self.control_signal == 'scale-proxy' else control
+            conditioning = self.gate.radius_controller(g)
+        return self.enhancer(features, points, continuous_scales=conditioning)
+
+    def decode_features(self, enhanced, prompt_indices, control, return_aux=False):
+        if enhanced.ndim != 3:
+            raise ValueError('enhanced features must be [B,N,C]')
+        b, n, _ = enhanced.shape
         if prompt_indices.shape != (b,) or ((prompt_indices < 0) | (prompt_indices >= n)).any():
             raise ValueError('prompt_indices must be local indices [B] in [0,N)')
         if control.shape != (b,) or not torch.isfinite(control).all() or ((control < 0) | (control > 1)).any():
             raise ValueError('control must be [B] with finite values in [0,1]')
-        if features is None:
-            if self.backbone is None:
-                raise ValueError('Supply cached PVCNN features or an explicit backbone')
-            features = self.backbone(points)
-        if features.shape[:2] != (b, n):
-            raise ValueError('feature/point alignment mismatch')
         g = 1 - control if self.control_signal == 'scale-proxy' else control
-        conditioning = control if self.model_variant == 'legacy' else None
-        if self.model_variant == 'radius-film':
-            conditioning = self.gate.radius_controller(g)
-        enhanced = self.enhancer(features, points, continuous_scales=conditioning)
-        prompt = enhanced[torch.arange(b, device=points.device), prompt_indices].unsqueeze(1)
+        prompt = enhanced[torch.arange(b, device=enhanced.device), prompt_indices].unsqueeze(1)
         aux = {}
         gates = None
         if self.gate is not None and self.model_variant != 'radius-film':
             aux = self.gate(enhanced, prompt_indices, g)
             if self.model_variant == 'spherical-hierarchy':
                 # Matched angular control: same projection, radius controller and aperture.
-                with torch.autocast(device_type=points.device.type, enabled=False):
+                with torch.autocast(device_type=enhanced.device.type, enabled=False):
                     h = self.gate.semantic_projection(enhanced.float())
                     h = torch.nn.functional.normalize(h, dim=-1, eps=1e-6)
                     q = h[torch.arange(b, device=h.device), prompt_indices]
@@ -86,3 +118,8 @@ class HyperSegH(nn.Module):
             gates = aux['gates']
         probs = self.seg_head(self.decoder(enhanced, prompt, gates=gates))
         return (probs, aux) if return_aux else probs
+
+    def forward(self, points, prompt_indices, control, features=None, return_aux=False, backbone_points=None):
+        self._validate_points(points, prompt_indices)
+        enhanced = self.encode_features(points, features, control, backbone_points)
+        return self.decode_features(enhanced, prompt_indices, control, return_aux)

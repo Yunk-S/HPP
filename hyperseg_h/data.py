@@ -12,6 +12,31 @@ def unit_sphere(points):
     return centered / centered.norm(dim=-1, keepdim=True).amax(dim=-2, keepdim=True).clamp_min(1e-8)
 
 
+def official_encoder_normalize(points):
+    """Match the bundled PartField/S²AM3D encoder preprocessing."""
+    points = points.float()
+    bbmin, bbmax = points.amin(dim=-2, keepdim=True), points.amax(dim=-2, keepdim=True)
+    center = (bbmin + bbmax) * 0.5
+    extent = (bbmax - bbmin).amax(dim=-1, keepdim=True).clamp_min(1e-8)
+    return (points - center) * (2.0 * 0.9 / extent)
+
+
+def official_decoder_normalize(points):
+    """Match the legacy decoder's per-coordinate standardization."""
+    points = points.float()
+    return (points - points.mean(dim=-2, keepdim=True)) / (points.std(dim=-2, keepdim=True) + 1e-6)
+
+
+def normalize_points(points, mode='unit-sphere'):
+    if mode == 'unit-sphere':
+        return unit_sphere(points)
+    if mode in ('official-decoder', 'legacy-standardize'):
+        return official_decoder_normalize(points)
+    if mode in ('official-encoder', 'partfield-encoder'):
+        return official_encoder_normalize(points)
+    raise ValueError(f'Unknown normalization mode: {mode}')
+
+
 def boundary_prompt(points, mask, alpha=0.5, chunk_size=1024):
     """Official center/interior score, with bounded-memory nearest-background distance."""
     foreground = torch.where(mask.bool())[0]
@@ -108,9 +133,12 @@ def validate_cache(cache, hierarchy=True):
 
 
 class HierarchyDataset(Dataset):
-    def __init__(self, records, num_points=10000, hierarchy=True, training=False, seed=0, leaf_quota=10):
+    def __init__(self, records, num_points=10000, hierarchy=True, training=False, seed=0,
+                 leaf_quota=10, normalization='unit-sphere', backbone_normalization=None):
         self.records, self.num_points, self.hierarchy = records, num_points, hierarchy
         self.training, self.seed, self.leaf_quota = training, seed, leaf_quota
+        self.normalization = normalization
+        self.backbone_normalization = backbone_normalization
         self.items, self.object_ids = [], []
         for obj, record in enumerate(records):
             cache = torch.load(record['cache_path'], map_location='cpu', weights_only=True)
@@ -139,7 +167,8 @@ class HierarchyDataset(Dataset):
             # A1 uses uniform point sampling; hierarchy quotas would alter the benchmark.
             indices = torch.from_numpy(rng.choice(len(cache['points']), self.num_points,
                                                   replace=len(cache['points']) < self.num_points))
-        points = unit_sphere(cache['points'][indices])
+        raw_points = cache['points'][indices].float()
+        points = normalize_points(raw_points, self.normalization)
         ids = cache['chains'][chain_idx]['node_ids']
         labels = torch.stack([masks[i][indices].float() for i in ids])
         valid = labels.bool().any(-1)
@@ -151,6 +180,8 @@ class HierarchyDataset(Dataset):
                'granularities': torch.linspace(0, 1, len(ids)) if len(ids) > 1 else torch.zeros(1),
                'scales': labels.mean(-1), 'prompt_indices': prompt,
                'model_id': record['model_id'], 'node_ids': ids}
+        if self.backbone_normalization is not None:
+            out['backbone_points'] = normalize_points(raw_points, self.backbone_normalization)
         if 'features' in cache:
             out['features'] = cache['features'][indices].float()
         return out
@@ -171,6 +202,10 @@ def collate_hierarchy(batch):
               'labels': torch.zeros(b, levels, n), 'valid': torch.zeros(b, levels, dtype=torch.bool),
               'granularities': torch.zeros(b, levels), 'scales': torch.zeros(b, levels),
               'model_id': [x['model_id'] for x in batch]}
+    if all('backbone_points' in x for x in batch):
+        result['backbone_points'] = torch.stack([x['backbone_points'] for x in batch])
+    elif any('backbone_points' in x for x in batch):
+        raise ValueError('Cannot mix records with and without backbone_points')
     if all('features' in x for x in batch):
         result['features'] = torch.stack([x['features'] for x in batch])
     elif any('features' in x for x in batch):
