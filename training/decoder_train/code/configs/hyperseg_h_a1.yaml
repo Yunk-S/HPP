@@ -1,0 +1,30 @@
+normalization: unit-sphere
+model:
+  model_variant: hyperseg-h
+  control_signal: scale-proxy
+  hierarchy_enabled: false
+  compatibility_mode: batch-first-corrected
+  feature_dim: 448
+  hidden_dim: 384
+  hyper_dim: 32
+  num_heads: 8
+  enhancer_layers: 2
+  decoder_layers: 4
+  dropout: 0.1
+  c: 1.0
+  rho_min: 0.15
+  rho_max: 0.85
+  key_radius: 0.95
+  cone_k: 0.1
+  beta: 5.0
+loss:
+  bce_weight: 0.7
+  dice_weight: 0.3
+  contain_weight: 0.1
+  geo_weight: 0.1
+  control_weight: 0.1
+# Optional raw-point encoder (otherwise supply aligned cached features):
+# backbone:
+#   config: encoder/configs/final/demo.yaml
+#   checkpoint: /path/to/encoder.ckpt
+#   freeze: true
