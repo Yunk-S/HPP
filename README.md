@@ -161,3 +161,10 @@ This project is built upon and inspired by the following excellent works:
 - [Segment Anything](https://github.com/facebookresearch/segment-anything) - Foundation model for image segmentation
 
 We thank the authors for their outstanding contributions to the community.
+
+## HyperSeg-H integration
+
+The optional hierarchy-aware implementation, compatibility modes, cache schema,
+Track A1/A2/C commands, checkpoint and object-ID audits, and smoke tests are documented
+in [scripts/README_HyperSeg-H.md](scripts/README_HyperSeg-H.md).
+The original scale-conditioned defaults remain available.

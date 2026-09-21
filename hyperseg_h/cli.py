@@ -183,6 +183,10 @@ def main(argv=None):
         if stored.get('format') == 'hyperseg-h-v1' and stored['config']['model'] != config['model']:
             raise ValueError('Full checkpoint model config differs: use its saved control and compatibility settings')
         audit = load_checkpoint(args.checkpoint, model)
+        if stored.get('format') == 'hyperseg-h-v1':
+            for key in ('training_object_ids', 'test_manifests', 'excluded_overlap_ids'):
+                if key in stored['config']:
+                    config[key] = stored['config'][key]
     elif args.action in ('eval', 'export'):
         parser.error('eval/export requires a trained --checkpoint')
     if args.action == 'export':
