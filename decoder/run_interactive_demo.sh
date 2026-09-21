@@ -1,5 +1,5 @@
 #!/bin/bash
-# S2AM3D Interactive Demo Launcher Script
+# HyperSeg-H Interactive Demo Launcher Script
 
 cd "$(dirname "$0")"
 
@@ -17,7 +17,7 @@ PORT=8080
 DEVICE="cuda:0"
 
 echo "=========================================="
-echo "Starting S2AM3D Interactive Demo..."
+echo "Starting HyperSeg-H Interactive Demo..."
 echo "=========================================="
 echo "Decoder config: $DECODER_CONFIG"
 echo "Decoder checkpoint: $DECODER_CKPT"

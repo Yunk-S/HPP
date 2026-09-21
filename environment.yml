@@ -1,4 +1,4 @@
-name: s2am3d
+name: hyperseg_h
 channels:
   - nvidia/label/cuda-12.4.0
   - defaults

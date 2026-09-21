@@ -38,7 +38,7 @@ POINT_SIZE = 0.005
 DEFAULT_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "demo"))
 
 
-class S2AM3DInference:
+class HyperSegHInference:
     
     def __init__(self, config, checkpoint_path, device='cuda:0'):
         self.config = config
@@ -154,6 +154,10 @@ def normalize_pc(pc):
     return pc
 
 
+# Backward-compatible import name for downstream users of the original demo.
+S2AM3DInference = HyperSegHInference
+
+
 class FeatureExtractor:
     
     def __init__(self, encoder_config_path, encoder_ckpt_path, device='cuda:0'):
@@ -250,7 +254,7 @@ def main(args):
     cli_args, extras = parse_args([args.config])
     config = load_config(args.config, cli_args=vars(cli_args), extra_args=extras)
     
-    model = S2AM3DInference(config, args.ckpt_path, device=args.device)
+    model = HyperSegHInference(config, args.ckpt_path, device=args.device)
     
     server = viser.ViserServer(host=args.host, port=args.port)
     server.scene.set_up_direction("+y")
@@ -394,7 +398,7 @@ def main(args):
     def _(client: viser.ClientHandle) -> None:
         title_markdown = client.gui.add_markdown(
             """
-            # 🎯 S2AM3D Interactive Segmentation
+            # 🎯 HyperSeg-H Interactive Segmentation
             
             **Interactive 3D Point Cloud Part Segmentation**
             """
@@ -865,7 +869,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="S2AM3D Interactive Point Cloud Segmentation Demo")
+    parser = argparse.ArgumentParser(description="HyperSeg-H Interactive Point Cloud Segmentation Demo")
     parser.add_argument('--config', type=str, required=True, help='Decoder config path')
     parser.add_argument('--ckpt_path', type=str, required=True, help='Decoder checkpoint path')
     parser.add_argument('--data_path', type=str, default=None, help='Point cloud data path (.npy file)')

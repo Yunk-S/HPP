@@ -4,7 +4,7 @@ control_signal: scale
 compatibility_mode: official-compatibility
 hierarchy_enabled: false
 normalization: legacy-standardize
-project_name: S2AM3D
+project_name: HyperSegH
 use_log: true
 use_continuous_scale: true
 scale_dropout_rate: 0.1
