@@ -78,6 +78,18 @@ def leaf_stratified_sample(node_masks, leaf_ids, num_points, rng, n_min=10):
     return torch.from_numpy(indices)
 
 
+def _uniform_sample_indices(num_available, num_points, rng):
+    if num_available == 0 or num_points <= 0:
+        raise ValueError('Point pool and num_points must be positive')
+    return torch.from_numpy(rng.choice(
+        num_available, num_points, replace=num_available < num_points).astype(np.int64))
+
+
+def cache_leaf_ids(cache):
+    """Return unique target leaves in stable chain order."""
+    return list(dict.fromkeys(chain['node_ids'][-1] for chain in cache['chains']))
+
+
 def read_manifest(path):
     path = Path(path)
     records = json.loads(path.read_text())
@@ -134,11 +146,13 @@ def validate_cache(cache, hierarchy=True):
 
 class HierarchyDataset(Dataset):
     def __init__(self, records, num_points=10000, hierarchy=True, training=False, seed=0,
-                 leaf_quota=10, normalization='unit-sphere', backbone_normalization=None):
+                 leaf_quota=10, normalization='unit-sphere', backbone_normalization=None,
+                 prompt_normalization='unit-sphere'):
         self.records, self.num_points, self.hierarchy = records, num_points, hierarchy
         self.training, self.seed, self.leaf_quota = training, seed, leaf_quota
         self.normalization = normalization
         self.backbone_normalization = backbone_normalization
+        self.prompt_normalization = prompt_normalization
         self.items, self.object_ids = [], []
         for obj, record in enumerate(records):
             cache = torch.load(record['cache_path'], map_location='cpu', weights_only=True)
@@ -165,21 +179,101 @@ class HierarchyDataset(Dataset):
             indices = leaf_stratified_sample(masks, leaf_ids, self.num_points, rng, self.leaf_quota)
         else:
             # A1 uses uniform point sampling; hierarchy quotas would alter the benchmark.
-            indices = torch.from_numpy(rng.choice(len(cache['points']), self.num_points,
-                                                  replace=len(cache['points']) < self.num_points))
+            indices = _uniform_sample_indices(len(cache['points']), self.num_points, rng)
         raw_points = cache['points'][indices].float()
         points = normalize_points(raw_points, self.normalization)
+        prompt_points = normalize_points(raw_points, self.prompt_normalization)
         ids = cache['chains'][chain_idx]['node_ids']
         labels = torch.stack([masks[i][indices].float() for i in ids])
         valid = labels.bool().any(-1)
         if not valid.any():
             raise ValueError(f'{record["model_id"]}: all targets vanished during sampling')
         deepest = torch.where(valid)[0][-1]
-        prompt = boundary_prompt(points, labels[deepest])
+        prompt = boundary_prompt(prompt_points, labels[deepest])
         out = {'points': points, 'labels': labels, 'valid': valid,
                'granularities': torch.linspace(0, 1, len(ids)) if len(ids) > 1 else torch.zeros(1),
                'scales': labels.mean(-1), 'prompt_indices': prompt,
                'model_id': record['model_id'], 'node_ids': ids}
+        if self.backbone_normalization is not None:
+            out['backbone_points'] = normalize_points(raw_points, self.backbone_normalization)
+        if 'features' in cache:
+            out['features'] = cache['features'][indices].float()
+        return out
+
+
+class A1ObjectDataset(Dataset):
+    """S²AM3D-style A1 sampling: one object, then one visible target part.
+
+    Training samples one object per item, uniformly subsamples its point pool,
+    and only then chooses a random target leaf that remains represented.  Eval
+    expands each object into deterministic object/target pairs while reusing
+    the same sampled point set for all targets of that object.
+    """
+    def __init__(self, records, num_points=10000, training=False, seed=0,
+                 normalization='unit-sphere', backbone_normalization=None,
+                 prompt_normalization='unit-sphere'):
+        self.records, self.num_points = records, num_points
+        self.training, self.seed = training, seed
+        self.normalization = normalization
+        self.backbone_normalization = backbone_normalization
+        self.prompt_normalization = prompt_normalization
+        self.items, self.object_ids = [], []
+        self.leaf_ids = []
+        for obj, record in enumerate(records):
+            cache = torch.load(record['cache_path'], map_location='cpu', weights_only=True)
+            validate_cache(cache, hierarchy=False)
+            if str(cache.get('model_id', record['model_id'])) != record['model_id']:
+                raise ValueError('Manifest/cache model_id mismatch')
+            leaves = cache_leaf_ids(cache)
+            if not leaves:
+                raise ValueError(f'{record["model_id"]}: cache has no target leaves')
+            self.leaf_ids.append(leaves)
+            if training:
+                self.items.append((obj, None))
+                self.object_ids.append(record['model_id'])
+            else:
+                for leaf_id in leaves:
+                    self.items.append((obj, leaf_id))
+                    self.object_ids.append(record['model_id'])
+        if not self.items:
+            raise ValueError('No A1 objects remain after ID filtering')
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, index):
+        obj, requested_leaf = self.items[index]
+        record = self.records[obj]
+        cache = torch.load(record['cache_path'], map_location='cpu', weights_only=True)
+        rng = np.random.default_rng(
+            int(np.random.randint(2**31)) if self.training else self.seed + obj)
+        indices = _uniform_sample_indices(len(cache['points']), self.num_points, rng)
+        raw_points = cache['points'][indices].float()
+        points = normalize_points(raw_points, self.normalization)
+        prompt_points = normalize_points(raw_points, self.prompt_normalization)
+        visible = [leaf_id for leaf_id in self.leaf_ids[obj]
+                   if cache['node_masks'][leaf_id][indices].any()]
+        if self.training:
+            if not visible:
+                raise ValueError(f'{record["model_id"]}: no target leaf survived sampling')
+            target_id = visible[int(rng.integers(len(visible)))]
+        else:
+            target_id = requested_leaf
+            if target_id not in visible:
+                raise ValueError(
+                    f'{record["model_id"]}: target leaf {target_id} vanished during A1 sampling')
+        labels = cache['node_masks'][target_id][indices].float().unsqueeze(0)
+        prompt = boundary_prompt(prompt_points, labels[0])
+        out = {
+            'points': points,
+            'labels': labels,
+            'valid': torch.ones(1, dtype=torch.bool),
+            'granularities': torch.zeros(1),
+            'scales': labels.mean(-1),
+            'prompt_indices': prompt,
+            'model_id': record['model_id'],
+            'node_ids': [target_id],
+        }
         if self.backbone_normalization is not None:
             out['backbone_points'] = normalize_points(raw_points, self.backbone_normalization)
         if 'features' in cache:

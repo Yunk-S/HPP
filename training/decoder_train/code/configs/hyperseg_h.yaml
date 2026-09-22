@@ -2,6 +2,7 @@
 # Raw-point backbones receive their own PartField normalization below.
 normalization: official-decoder
 backbone_normalization: official-encoder
+prompt_normalization: unit-sphere
 model:
   model_variant: hyperseg-h
   control_signal: hierarchy

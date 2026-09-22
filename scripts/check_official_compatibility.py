@@ -36,6 +36,7 @@ def compare(upstream_root):
 
     from decoder.models.CrossAttentionDecoder import Decoder
     from decoder.models.PointFeatureEnhancer import PointFeatureEnhancer
+    from decoder.models.seghead_mlp import SegHead
 
     checks = []
     enhancer_args = dict(feature_dim=12, feature_proj_dim=24, pos_num_feats=8,
@@ -59,6 +60,22 @@ def compare(upstream_root):
     decoder_inputs = (torch.randn(2, 13, 24), torch.randn(2, 1, 24))
     checks.append(('CrossAttentionDecoder',
                    (current(*decoder_inputs) - reference(*decoder_inputs)).abs().max().item()))
+    gated = Decoder(24, 4, num_layers=3, gate_aware=True,
+                    prompt_propagation=False).eval()
+    gated.load_state_dict(reference.state_dict(), strict=True)
+    gates = torch.ones(2, 13)
+    checks.append(('GateAwareDecoder(gates=1)',
+                   (gated(decoder_inputs[0], decoder_inputs[1], gates=gates) -
+                    reference(*decoder_inputs)).abs().max().item()))
+
+    upstream_seghead = load_source(
+        upstream_root / 'decoder/models/seghead_mlp.py', 'upstream_seghead')
+    reference = upstream_seghead.SegHead(24, dropout=0.).eval()
+    current = SegHead(24, dropout=0.).eval()
+    current.load_state_dict(reference.state_dict(), strict=True)
+    torch.manual_seed(13)
+    seg_inputs = torch.randn(2, 13, 24)
+    checks.append(('SegHead', (current(seg_inputs) - reference(seg_inputs)).abs().max().item()))
     for name, error in checks:
         if error > 1e-6:
             raise AssertionError(f'{name} compatibility error={error:.8g}')

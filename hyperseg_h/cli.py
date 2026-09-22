@@ -6,7 +6,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from .model import HyperSegH
-from .data import read_manifest, exclude_overlap, HierarchyDataset, ObjectBalancedSampler, collate_hierarchy
+from .data import (read_manifest, exclude_overlap, HierarchyDataset, A1ObjectDataset,
+                   ObjectBalancedSampler, collate_hierarchy)
 from .checkpoint import load_checkpoint, save_checkpoint
 
 
@@ -29,6 +30,19 @@ def make_model(config, device, initialize_backbone=True):
     return HyperSegH(**options).to(device)
 
 
+def _apply_backbone_overrides(config, args):
+    if args.backbone_config or args.encoder_checkpoint:
+        backbone = dict(config.get('backbone') or {})
+        if args.backbone_config:
+            backbone['config'] = args.backbone_config
+        if args.encoder_checkpoint:
+            backbone['checkpoint'] = args.encoder_checkpoint
+        config['backbone'] = backbone
+    backbone = config.get('backbone')
+    if backbone and not backbone.get('config'):
+        raise ValueError('backbone.config is required for raw-point training')
+
+
 def validate_protocol(config, track, num_points):
     model = config['model']
     signal, hierarchy = model['control_signal'], model['hierarchy_enabled']
@@ -41,6 +55,8 @@ def validate_protocol(config, track, num_points):
     if config.get('normalization', 'unit-sphere') not in (
             'unit-sphere', 'official-decoder', 'legacy-standardize'):
         raise ValueError('Unknown decoder normalization for track CLI')
+    if config.get('prompt_normalization', 'unit-sphere') != 'unit-sphere':
+        raise ValueError('A1 fairness protocol requires unit-sphere prompt coordinates')
     if num_points != 10000:
         print('NON-BENCHMARK RUN: point count differs from the 10,000-point protocol')
 
@@ -160,6 +176,8 @@ def main(argv=None):
     parser.add_argument('--amp', action='store_true')
     parser.add_argument('--model-variant', choices=['legacy', 'hyperseg-h', 'radius-film', 'spherical-hierarchy'])
     parser.add_argument('--control-signal', choices=['scale', 'scale-proxy', 'hierarchy'])
+    parser.add_argument('--backbone-config', help='Override raw-point encoder architecture config')
+    parser.add_argument('--encoder-checkpoint', help='Override raw-point encoder checkpoint')
     args = parser.parse_args(argv)
     if not 0 < args.threshold < 1 or args.sweep_steps < 2 or args.epochs < 1:
         parser.error('threshold must lie in (0,1), sweep_steps >= 2, epochs >= 1')
@@ -182,6 +200,7 @@ def main(argv=None):
         if 'config' not in stored:
             parser.error('Official checkpoints require an explicit model config')
         config = stored['config']
+    _apply_backbone_overrides(config, args)
     config.setdefault('model', {})
     config['model'].setdefault('model_variant', 'hyperseg-h')
     config['model'].setdefault('compatibility_mode', 'official-compatibility')
@@ -230,16 +249,16 @@ def main(argv=None):
         overlap = set(config['training_object_ids']) & {r['model_id'] for r in records}
         if overlap:
             raise ValueError(f'Evaluation IDs overlap checkpoint training IDs: {sorted(overlap)}')
-    dataset = HierarchyDataset(
-        records, args.num_points, hierarchy=args.track != 'A1',
+    dataset_cls = A1ObjectDataset if args.track == 'A1' else HierarchyDataset
+    dataset_kwargs = dict(
         training=args.action == 'train', seed=args.seed,
         normalization=config.get('normalization', 'unit-sphere'),
-        backbone_normalization=config.get('backbone_normalization'))
+        backbone_normalization=config.get('backbone_normalization'),
+        prompt_normalization=config.get('prompt_normalization', 'unit-sphere'))
     if args.track == 'A1':
-        for record in records:
-            cache = torch.load(record['cache_path'], weights_only=True, map_location='cpu')
-            if any(len(c['node_ids']) != 1 for c in cache['chains']):
-                raise ValueError('A1 cache requires one singleton chain per target mask')
+        dataset = dataset_cls(records, args.num_points, **dataset_kwargs)
+    else:
+        dataset = dataset_cls(records, args.num_points, hierarchy=True, **dataset_kwargs)
     sampler = ObjectBalancedSampler(dataset.object_ids) if args.action == 'train' else None
     loader = DataLoader(dataset, batch_size=args.batch_size, sampler=sampler, collate_fn=collate_hierarchy)
     provenance = {'config': config, 'args': vars(args), 'checkpoint_audit': audit,

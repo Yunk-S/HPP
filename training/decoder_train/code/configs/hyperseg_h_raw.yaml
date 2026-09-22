@@ -1,10 +1,16 @@
+# Raw PartNeXt -> official PVCNN/triplane backbone -> HyperSeg-H.
+# The encoder checkpoint is intentionally external and is not committed.
 normalization: official-decoder
 backbone_normalization: official-encoder
 prompt_normalization: unit-sphere
+backbone:
+  config: encoder/configs/final/demo.yaml
+  checkpoint: ckpt/Encoder.ckpt
+  freeze: true
 model:
   model_variant: hyperseg-h
-  control_signal: scale-proxy
-  hierarchy_enabled: false
+  control_signal: hierarchy
+  hierarchy_enabled: true
   compatibility_mode: official-compatibility
   prompt_propagation: false
   feature_dim: 448
@@ -21,14 +27,9 @@ model:
   cone_k: 0.1
   beta: 5.0
 loss:
-  seg_loss_mode: official_adaptive
+  seg_loss_mode: per_level_adaptive
   bce_weight: 0.7
   dice_weight: 0.3
   contain_weight: 0.1
   geo_weight: 0.1
   control_weight: 0.1
-# Optional raw-point encoder (otherwise supply aligned cached features):
-# backbone:
-#   config: encoder/configs/final/demo.yaml
-#   checkpoint: /path/to/encoder.ckpt
-#   freeze: true

@@ -3,6 +3,7 @@
 # attention without changing the HyperSeg-H geometry or loss recipe.
 normalization: official-decoder
 backbone_normalization: official-encoder
+prompt_normalization: unit-sphere
 model:
   model_variant: hyperseg-h
   control_signal: hierarchy

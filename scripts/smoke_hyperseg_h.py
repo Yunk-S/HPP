@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 import numpy as np
@@ -20,7 +21,7 @@ from hyperseg_h.model import HyperSegH
 from hyperseg_h.checkpoint import audit_load, load_checkpoint, load_official, save_checkpoint
 from hyperseg_h.data import (unit_sphere, official_encoder_normalize, official_decoder_normalize,
     boundary_prompt, leaf_stratified_sample, validate_cache,
-    HierarchyDataset, ObjectBalancedSampler, collate_hierarchy, exclude_overlap)
+    HierarchyDataset, A1ObjectDataset, ObjectBalancedSampler, collate_hierarchy, exclude_overlap)
 from hyperseg_h.losses import HierarchyLoss, adaptive_bce_dice, containment_loss, geometric_loss
 
 
@@ -241,6 +242,46 @@ class SmokeTests(unittest.TestCase):
             validate_cache(broken)
         sampler = ObjectBalancedSampler(['id-2','id-2','id-99'])
         torch.testing.assert_close(sampler.weights,torch.tensor([.5,.5,1.],dtype=torch.double))
+
+    def test_a1_samples_object_then_visible_target_and_unit_prompt(self):
+        item = cache()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'a1.pt'
+            torch.save(item, path)
+            records = [{'model_id': item['model_id'], 'cache_path': str(path)}]
+            dataset = A1ObjectDataset(
+                records, num_points=24, training=False, seed=0,
+                normalization='official-decoder', prompt_normalization='unit-sphere')
+            self.assertEqual(len(dataset), 1)
+            sample = dataset[0]
+            rng = np.random.default_rng(0)
+            indices = torch.from_numpy(rng.choice(24, 24, replace=False).astype(np.int64))
+            raw = item['points'][indices]
+            expected_prompt = boundary_prompt(
+                unit_sphere(raw), item['node_masks']['tiny'][indices])
+            self.assertEqual(int(sample['prompt_indices']), int(expected_prompt))
+            self.assertEqual(tuple(sample['labels'].shape), (1, 24))
+
+    def test_partnext_leaf_sampling_and_support_contraction(self):
+        from scripts.prepare_partnext_hierarchy import _hierarchy_cache, _sample_points
+        mesh = SimpleNamespace(
+            vertices=np.asarray([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.],
+                                 [0., 0., 1.], [1., 1., 0.]], dtype=np.float32),
+            faces=np.asarray([[0, 1, 2], [0, 3, 4]], dtype=np.int64))
+        points, faces = _sample_points(
+            mesh, {'tiny': np.asarray([1]), 'other': np.asarray([0])},
+            ['tiny', 'other'], 20, seed=3, leaf_quota=5)
+        self.assertGreaterEqual(int((faces == 1).sum()), 5)
+        self.assertGreaterEqual(int((faces == 0).sum()), 5)
+        annotation = {'hierarchyList': [{
+            'nodeId': 'root', 'children': [{
+                'nodeId': 'unary', 'children': [{'nodeId': 'leaf', 'maskId': 'm'}]
+            }]
+        }]}
+        mask = np.ones(20, dtype=np.uint8)
+        contracted = _hierarchy_cache(annotation, {'m': mask}, 'obj', points)
+        self.assertEqual(contracted['chains'][0]['node_ids'], ['root'])
+        self.assertEqual(contracted['chains'][0]['original_node_ids'], ['root', 'unary', 'leaf'])
 
     def test_overlap(self):
         with tempfile.TemporaryDirectory() as tmp:

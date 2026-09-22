@@ -2,7 +2,7 @@
 import torch
 
 
-def audit_load(module, state, name='module', minimum=0.95):
+def audit_load(module, state, name='module', minimum=1.0):
     module = getattr(module, 'module', module)
     state = {k.removeprefix('module.'): v for k, v in state.items()}
     expected = module.state_dict()
@@ -11,13 +11,21 @@ def audit_load(module, state, name='module', minimum=0.95):
     total = sum(v.numel() for v in parameters.values())
     loaded = sum(v.numel() for k, v in parameters.items() if k in matched)
     ratio = loaded / max(total, 1)
+    missing = sorted(set(expected) - set(matched))
+    missing_parameters = sorted(set(parameters) - set(matched))
+    missing_buffers = sorted((set(expected) - set(parameters)) - set(matched))
     report = {'name': name, 'ratio': ratio, 'loaded_numel': loaded, 'total_numel': total,
-              'missing': sorted(set(expected) - set(matched)),
+              'key_coverage': len(matched) / max(len(expected), 1),
+              'matched_keys': len(matched), 'expected_keys': len(expected),
+              'missing': missing, 'missing_parameters': missing_parameters,
+              'missing_buffers': missing_buffers,
               'unexpected': sorted(set(state) - set(expected)),
               'shape_mismatch': sorted(k for k in state if k in expected and state[k].shape != expected[k].shape)}
-    if ratio < minimum or report['shape_mismatch']:
+    if ratio < minimum or missing or report['shape_mismatch']:
         raise RuntimeError(f'{name} checkpoint audit failed: {report}')
-    module.load_state_dict(matched, strict=False)
+    # All expected parameters and buffers must be present. Extra keys from a
+    # wrapper checkpoint are ignored after the exact expected state is loaded.
+    module.load_state_dict({k: matched[k] for k in expected}, strict=True)
     return report
 
 
