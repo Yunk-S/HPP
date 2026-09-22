@@ -1,3 +1,4 @@
+precision: bf16
 normalization: official-decoder
 backbone_normalization: official-encoder
 prompt_normalization: unit-sphere

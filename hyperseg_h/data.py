@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import numpy as np
 import torch
-from torch.utils.data import Dataset, WeightedRandomSampler
+from torch.utils.data import Dataset, Sampler, WeightedRandomSampler
 
 
 def unit_sphere(points):
@@ -103,14 +103,15 @@ def read_manifest(path):
     return records
 
 
-def exclude_overlap(train_records, test_records, output_dir):
+def exclude_overlap(train_records, test_records, output_dir=None):
     test_ids = {str(r['model_id']) for r in test_records}
     overlap = sorted({str(r['model_id']) for r in train_records} & test_ids)
     kept = [r for r in train_records if str(r['model_id']) not in test_ids]
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / 'excluded_overlap_ids.txt').write_text(''.join(x + '\n' for x in overlap))
-    (out / 'train_deoverlapped.json').write_text(json.dumps(kept, indent=2))
+    if output_dir is not None:
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / 'excluded_overlap_ids.txt').write_text(''.join(x + '\n' for x in overlap))
+        (out / 'train_deoverlapped.json').write_text(json.dumps(kept, indent=2))
     return kept, overlap
 
 
@@ -286,6 +287,44 @@ class ObjectBalancedSampler(WeightedRandomSampler):
         from collections import Counter
         counts = Counter(object_ids)
         super().__init__([1.0 / counts[i] for i in object_ids], len(object_ids), replacement=True, generator=generator)
+
+
+class DistributedObjectBalancedSampler(Sampler):
+    """One random item per object per epoch, globally shuffled then sharded.
+
+    A1 selects objects (the dataset then selects a visible target); A2/C selects
+    one chain uniformly within each object. No object appears on multiple ranks
+    or twice in an epoch. Drop the shuffled tail to a full global batch instead
+    of padding with repeated objects. The tail changes with seed + epoch.
+    """
+    def __init__(self, object_ids, num_replicas=1, rank=0, batch_size=1, seed=0):
+        if num_replicas < 1 or not 0 <= rank < num_replicas or batch_size < 1:
+            raise ValueError('Invalid sampler rank, world size or batch size')
+        self.groups = {}
+        for index, object_id in enumerate(object_ids):
+            self.groups.setdefault(object_id, []).append(index)
+        self.num_replicas, self.rank = num_replicas, rank
+        self.seed, self.epoch = seed, 0
+        global_batch = num_replicas * batch_size
+        self.total_size = len(self.groups) // global_batch * global_batch
+        self.num_samples = self.total_size // num_replicas
+        self.dropped_objects = len(self.groups) - self.total_size
+        if self.total_size == 0:
+            raise ValueError('Need at least one global batch of distinct objects; reduce batch size or ranks')
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def __len__(self):
+        return self.num_samples
+
+    def __iter__(self):
+        generator = torch.Generator().manual_seed(self.seed + self.epoch)
+        groups = list(self.groups.values())
+        order = torch.randperm(len(groups), generator=generator).tolist()[:self.total_size]
+        indices = [groups[i][torch.randint(len(groups[i]), (1,), generator=generator).item()]
+                   for i in order]
+        return iter(indices[self.rank::self.num_replicas])
 
 
 def collate_hierarchy(batch):

@@ -1,5 +1,6 @@
 """Audited loading, including official DDP-prefixed component checkpoints."""
 import torch
+from .distributed import unwrap_model
 
 
 def audit_load(module, state, name='module', minimum=1.0):
@@ -31,17 +32,21 @@ def audit_load(module, state, name='module', minimum=1.0):
 
 def load_official(model, checkpoint):
     """Initialize old modules only; the new gate is intentionally freshly initialized."""
+    model = unwrap_model(model)
     return [audit_load(getattr(model, attr), checkpoint[key], attr) for attr, key in (
         ('enhancer', 'point_feature_enhancer_state_dict'),
         ('decoder', 'decoder_state_dict'), ('seg_head', 'seg_head_state_dict'))]
 
 
 def save_checkpoint(path, model, config, **extra):
+    if torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
+        return
     torch.save({'format': 'hyperseg-h-v1', 'config': dict(config),
-                'model_state_dict': model.state_dict(), **extra}, path)
+                'model_state_dict': unwrap_model(model).state_dict(), **extra}, path)
 
 
 def load_checkpoint(path, model):
+    model = unwrap_model(model)
     checkpoint = torch.load(path, map_location='cpu', weights_only=True)
     if checkpoint.get('format') == 'hyperseg-h-v1':
         # Full checkpoints must restore every new parameter, not just the large legacy modules.

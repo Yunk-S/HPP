@@ -7,8 +7,10 @@ import torch
 from torch.utils.data import DataLoader
 from .model import HyperSegH
 from .data import (read_manifest, exclude_overlap, HierarchyDataset, A1ObjectDataset,
-                   ObjectBalancedSampler, collate_hierarchy)
+                   ObjectBalancedSampler, DistributedObjectBalancedSampler, collate_hierarchy)
 from .checkpoint import load_checkpoint, save_checkpoint
+from .distributed import (init_distributed, cleanup_distributed, wrap_model,
+                          resolve_precision, mean_metrics)
 
 
 def load_config(path):
@@ -43,7 +45,7 @@ def _apply_backbone_overrides(config, args):
         raise ValueError('backbone.config is required for raw-point training')
 
 
-def validate_protocol(config, track, num_points):
+def validate_protocol(config, track, num_points, verbose=True):
     model = config['model']
     signal, hierarchy = model['control_signal'], model['hierarchy_enabled']
     if track == 'A1' and (hierarchy or signal not in ('scale', 'scale-proxy')):
@@ -57,7 +59,7 @@ def validate_protocol(config, track, num_points):
         raise ValueError('Unknown decoder normalization for track CLI')
     if config.get('prompt_normalization', 'unit-sphere') != 'unit-sphere':
         raise ValueError('A1 fairness protocol requires unit-sphere prompt coordinates')
-    if num_points != 10000:
+    if num_points != 10000 and verbose:
         print('NON-BENCHMARK RUN: point count differs from the 10,000-point protocol')
 
 
@@ -164,25 +166,44 @@ def main(argv=None):
     parser.add_argument('--manifest')
     parser.add_argument('--test-manifest', action='append', default=[], help='Repeat for ALL held-out datasets')
     parser.add_argument('--checkpoint')
+    parser.add_argument('--resume', action='store_true',
+                        help='Restore optimizer, scaler and next epoch from a full --checkpoint')
     parser.add_argument('--output', required=True)
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--num-points', type=int, default=10000)
-    parser.add_argument('--batch-size', type=int, default=1)
-    parser.add_argument('--epochs', type=int, default=1)
-    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--batch-size', type=int, default=1, help='Per-GPU batch size; global = batch-size * WORLD_SIZE')
+    parser.add_argument('--epochs', type=int, default=1, help='Total target epoch count, including resumed epochs')
+    parser.add_argument('--lr', type=float, default=1e-4,
+                        help='AdamW learning rate; no automatic world-size scaling or scheduler')
     parser.add_argument('--threshold', type=float, default=0.7, help='Fix using validation only')
     parser.add_argument('--sweep-steps', type=int, default=11)
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--amp', action='store_true')
+    parser.add_argument('--amp', action='store_true', help='Legacy AMP: CUDA fp16 / CPU bf16; --precision overrides')
+    parser.add_argument('--precision', choices=['bf16', 'fp16', 'none'],
+                        help='Override config precision (A800 configs default to bf16)')
     parser.add_argument('--model-variant', choices=['legacy', 'hyperseg-h', 'radius-film', 'spherical-hierarchy'])
     parser.add_argument('--control-signal', choices=['scale', 'scale-proxy', 'hierarchy'])
     parser.add_argument('--backbone-config', help='Override raw-point encoder architecture config')
     parser.add_argument('--encoder-checkpoint', help='Override raw-point encoder checkpoint')
     args = parser.parse_args(argv)
-    if not 0 < args.threshold < 1 or args.sweep_steps < 2 or args.epochs < 1:
-        parser.error('threshold must lie in (0,1), sweep_steps >= 2, epochs >= 1')
+    if not 0 < args.threshold < 1 or args.sweep_steps < 2 or args.epochs < 1 or args.batch_size < 1:
+        parser.error('threshold must lie in (0,1), sweep_steps >= 2, epochs and batch-size >= 1')
+    if args.resume and (args.action != 'train' or not args.checkpoint):
+        parser.error('--resume requires train and a full --checkpoint')
+    context = init_distributed(args.action, args.device)
+    # Under torchrun, non-training actions run only on rank 0, without a group.
+    if args.action != 'train' and not context.is_primary:
+        return
+    args.device = str(context.device)
+    try:
+        _run(args, parser, context)
+    finally:
+        cleanup_distributed(context)
+
+
+def _run(args, parser, context):
     torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+    np.random.seed(args.seed + context.rank)
     output = Path(args.output)
     if args.action == 'audit-ids':
         if not args.manifest or not args.test_manifest:
@@ -211,7 +232,11 @@ def main(argv=None):
         config['model']['hierarchy_enabled'] = args.control_signal == 'hierarchy'
     if 'control_signal' not in config['model'] or 'hierarchy_enabled' not in config['model']:
         parser.error('Config must explicitly set control_signal and hierarchy_enabled')
-    validate_protocol(config, args.track, args.num_points)
+    validate_protocol(config, args.track, args.num_points, verbose=context.is_primary)
+    precision = resolve_precision(
+        args.precision if args.precision is not None else (None if args.amp else config.get('precision')),
+        args.amp, args.device)
+    config['precision'] = precision
     if args.checkpoint and stored is None:
         stored = torch.load(args.checkpoint, map_location='cpu', weights_only=True)
     initialize_backbone = not (stored is not None and stored.get('format') == 'hyperseg-h-v1')
@@ -235,13 +260,14 @@ def main(argv=None):
         return
     if not args.manifest:
         parser.error('train/eval requires --manifest')
-    output.mkdir(parents=True, exist_ok=True)
+    if context.is_primary:
+        output.mkdir(parents=True, exist_ok=True)
     records = read_manifest(args.manifest)
     if args.action == 'train':
         if not args.test_manifest:
             parser.error('Training requires --test-manifest for strict object-ID de-overlap')
         test = [r for p in args.test_manifest for r in read_manifest(p)]
-        records, overlap = exclude_overlap(records, test, output)
+        records, overlap = exclude_overlap(records, test, output if context.is_primary else None)
         config['excluded_overlap_ids'] = overlap
         config['training_object_ids'] = sorted({r['model_id'] for r in records})
         config['test_manifests'] = args.test_manifest
@@ -259,26 +285,70 @@ def main(argv=None):
         dataset = dataset_cls(records, args.num_points, **dataset_kwargs)
     else:
         dataset = dataset_cls(records, args.num_points, hierarchy=True, **dataset_kwargs)
-    sampler = ObjectBalancedSampler(dataset.object_ids) if args.action == 'train' else None
+    sampler = None
+    if args.action == 'train':
+        sampler = (DistributedObjectBalancedSampler(
+            dataset.object_ids, context.world_size, context.rank, args.batch_size, args.seed)
+            if context.distributed else ObjectBalancedSampler(dataset.object_ids))
     loader = DataLoader(dataset, batch_size=args.batch_size, sampler=sampler, collate_fn=collate_hierarchy)
+    active_world_size = context.world_size if context.distributed else 1
     provenance = {'config': config, 'args': vars(args), 'checkpoint_audit': audit,
+                  'distributed': {'enabled': context.distributed, 'world_size': active_world_size,
+                                  'per_gpu_batch_size': args.batch_size,
+                                  'global_batch_size': args.batch_size * active_world_size,
+                                  'sampler': type(sampler).__name__,
+                                  'objects_dropped_per_epoch': getattr(sampler, 'dropped_objects', 0),
+                                  'learning_rate_scaling': 'none',
+                                  'loss_reduction': 'mean of per-rank objectives'},
                   'protocol_status': 'implementation; official benchmark parity requires dataset/protocol verification'}
-    (output / 'run_config.json').write_text(json.dumps(provenance, indent=2))
+    if context.is_primary:
+        (output / 'run_config.json').write_text(json.dumps(provenance, indent=2))
     if args.action == 'train':
         from training.decoder_train.code.train import HyperSegTrainer
+        model = wrap_model(model, context)
+        # Preserve parameter-group layout for pre-DDP single-device checkpoints.
+        # Frozen parameters have no gradients and AdamW will not update them.
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
         loss_options = dict(config.get('loss', {}))
         if args.track == 'A1':
             loss_options.update(contain_weight=0., control_weight=0.)
-        trainer = HyperSegTrainer(model, optimizer, args.device, args.track, args.amp, loss_options)
+        trainer = HyperSegTrainer(model, optimizer, args.device, args.track, args.amp, loss_options,
+                                  precision=precision)
+        start_epoch = 0
+        if args.resume:
+            if stored.get('format') != 'hyperseg-h-v1' or 'optimizer' not in stored:
+                raise ValueError('--resume requires a full training checkpoint with optimizer state')
+            optimizer.load_state_dict(stored['optimizer'])
+            if trainer.scaler is not None and stored.get('scaler'):
+                trainer.scaler.load_state_dict(stored['scaler'])
+            start_epoch = int(stored.get('epoch', 0))
+            if start_epoch >= args.epochs:
+                raise ValueError('--epochs must exceed the checkpoint epoch when resuming')
         history = []
-        for epoch in range(args.epochs):
+        if args.resume and context.is_primary and (output / 'train_metrics.json').exists():
+            history = [row for row in json.loads((output / 'train_metrics.json').read_text())
+                       if row['epoch'] < start_epoch]
+        for epoch in range(start_epoch, args.epochs):
+            # Epoch-boundary resume reproduces data/dropout RNG without storing
+            # unsafe pickled NumPy states. The sampler uses its own shared seed.
+            epoch_seed = args.seed + context.rank + epoch * context.world_size
+            torch.manual_seed(epoch_seed)
+            np.random.seed(epoch_seed % (2**32))
+            if hasattr(sampler, 'set_epoch'):
+                sampler.set_epoch(epoch)
             for batch in loader:
-                history.append({'epoch': epoch, **trainer.step(batch)})
-            save_checkpoint(output / 'latest.pt', model, config, epoch=epoch + 1,
-                            optimizer=optimizer.state_dict(), scaler=trainer.scaler.state_dict(), audit=audit)
-            print(json.dumps(history[-1]), flush=True)
-        (output / 'train_metrics.json').write_text(json.dumps(history, indent=2))
+                metrics = mean_metrics(trainer.step(batch), context)
+                if context.is_primary:
+                    history.append({'epoch': epoch, **metrics})
+            if context.is_primary:
+                save_checkpoint(output / 'latest.pt', model, config, epoch=epoch + 1,
+                                optimizer=optimizer.state_dict(),
+                                scaler=trainer.scaler.state_dict() if trainer.scaler is not None else None,
+                                audit=audit)
+                print(json.dumps(history[-1]), flush=True)
+                (output / 'train_metrics.json').write_text(json.dumps(history, indent=2))
+            if context.distributed:
+                torch.distributed.barrier()
     else:
         metrics = evaluate(model, loader, args.device, args.threshold, args.sweep_steps, args.track)
         metrics['num_points'] = args.num_points

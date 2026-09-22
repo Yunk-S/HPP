@@ -146,59 +146,55 @@ class Trainer(object):
 
 
 class HyperSegTrainer:
-    """Single-device hierarchy trainer; legacy distributed Trainer remains available."""
-    def __init__(self, model, optimizer, device, track='A2', amp=False, loss_options=None):
+    """Whole-model DDP or single-device training with one hierarchy forward."""
+    def __init__(self, model, optimizer, device, track='A2', amp=False, loss_options=None,
+                 precision=None):
         from hyperseg_h.losses import HierarchyLoss
+        from hyperseg_h.distributed import resolve_precision, autocast_dtype
         self.model, self.optimizer, self.device = model, optimizer, torch.device(device)
-        self.track, self.amp = track, amp
+        self.track = track
+        self.precision = resolve_precision(precision, amp, self.device)
+        self.amp = self.precision != 'none'
+        self.amp_dtype = autocast_dtype(self.precision)
         self.objective = HierarchyLoss(**(loss_options or {}))
-        self.scaler = torch.amp.GradScaler(self.device.type, enabled=amp and self.device.type == 'cuda')
+        self.scaler = (torch.amp.GradScaler(self.device.type)
+                       if self.precision == 'fp16' else None)
 
     def predict_levels(self, batch):
-        outputs, energies = [], []
-        features = batch.get('features')
-        backbone_points = batch.get('backbone_points')
-        if features is None and self.model.backbone is not None:
-            features = self.model.backbone(backbone_points if backbone_points is not None else batch['points'])
-        controls = batch['granularities'] if self.model.control_signal == 'hierarchy' else batch['scales']
-        enhanced = None
-        if self.model.encoder_is_control_invariant:
-            # HyperSeg-H does not FiLM-condition the enhancer.  Compute the
-            # O(N^2) point encoder once and reuse it for every hierarchy level.
-            enhanced = self.model.encode_features(batch['points'], features, backbone_points=backbone_points)
-        for level in range(controls.shape[1]):
-            if enhanced is None:
-                pred, aux = self.model(batch['points'], batch['prompt_indices'], controls[:, level], features, True)
-            else:
-                pred, aux = self.model.decode_features(
-                    enhanced, batch['prompt_indices'], controls[:, level], True)
-            outputs.append(pred)
-            if 'energy' in aux:
-                energies.append(aux['energy'])
-        middle = []
-        if self.track != 'A1' and self.objective.weights[-1] > 0:
-            for level in range(controls.shape[1] - 1):
-                control = (controls[:, level] + controls[:, level + 1]) / 2
-                if enhanced is None:
-                    middle.append(self.model(batch['points'], batch['prompt_indices'], control, features))
-                else:
-                    middle.append(self.model.decode_features(enhanced, batch['prompt_indices'], control))
-        return (torch.stack(outputs, 1), torch.stack(energies, 1) if energies else None,
-                torch.stack(middle, 1) if middle else None)
+        from hyperseg_h.distributed import unwrap_model
+        # Unwrap for metadata only. All trainable computation enters DDP.forward.
+        signal = unwrap_model(self.model).control_signal
+        controls = batch['granularities'] if signal == 'hierarchy' else batch['scales']
+        result = self.model(
+            batch['points'], batch['prompt_indices'], controls=controls,
+            features=batch.get('features'), backbone_points=batch.get('backbone_points'),
+            compute_midpoints=self.track != 'A1' and self.objective.weights[-1] > 0)
+        return result['predictions'], result['energies'], result['middle']
 
     def step(self, batch):
         batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=self.device.type, enabled=self.amp,
-                            dtype=torch.float16 if self.device.type == 'cuda' else torch.bfloat16):
+                            dtype=self.amp_dtype):
             probs, energy, middle = self.predict_levels(batch)
-        total, parts = self.objective(probs, batch['labels'], batch['valid'], energy, middle)
-        if not torch.isfinite(total):
+        with torch.autocast(device_type=self.device.type, enabled=False):
+            total, parts = self.objective(probs, batch['labels'], batch['valid'], energy, middle)
+        finite = torch.isfinite(total).int()
+        if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
+            # Every rank aborts before backward if any rank has invalid loss.
+            torch.distributed.all_reduce(finite, op=torch.distributed.ReduceOp.MIN)
+        if not finite.item():
             raise FloatingPointError('Nonfinite training loss')
-        self.scaler.scale(total).backward()
-        self.scaler.unscale_(self.optimizer)
+        if self.scaler is not None:
+            self.scaler.scale(total).backward()
+            self.scaler.unscale_(self.optimizer)
+        else:
+            total.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0, error_if_nonfinite=True)
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
+        if self.scaler is not None:
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            self.optimizer.step()
         return {'loss': float(total.detach()), **{k: float(v.detach()) for k, v in parts.items()}}

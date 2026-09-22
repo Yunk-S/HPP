@@ -1,5 +1,6 @@
 # Raw PartNeXt -> official PVCNN/triplane backbone -> HyperSeg-H.
 # The encoder checkpoint is intentionally external and is not committed.
+precision: bf16
 normalization: official-decoder
 backbone_normalization: official-encoder
 prompt_normalization: unit-sphere

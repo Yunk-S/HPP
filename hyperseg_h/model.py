@@ -45,6 +45,11 @@ class HyperSegH(nn.Module):
                                prompt_propagation=prompt_propagation)
         self.seg_head = SegHead(hidden_dim, dropout)
         self.gate = EntailmentConeGate(hidden_dim, hyper_dim, **geometry) if model_variant != 'legacy' else None
+        if model_variant == 'radius-film':
+            # This ablation uses only the radius controller. Keep checkpoint
+            # keys, but exclude inactive parameters from DDP's gradient reducer.
+            self.gate.semantic_projection.requires_grad_(False)
+            self.gate.raw_beta.requires_grad_(False)
 
     def train(self, mode=True):
         super().train(mode)
@@ -119,7 +124,52 @@ class HyperSegH(nn.Module):
         probs = self.seg_head(self.decoder(enhanced, prompt, gates=gates))
         return (probs, aux) if return_aux else probs
 
-    def forward(self, points, prompt_indices, control, features=None, return_aux=False, backbone_points=None):
+    def forward_hierarchy(self, points, prompt_indices, controls, features=None,
+                          backbone_points=None, compute_midpoints=False):
+        """Encode once and decode [B,L] controls within a single DDP forward.
+
+        Control-dependent legacy/FiLM ablations reuse the backbone but must
+        recompute the enhancer for each control, matching single-device behavior.
+        """
+        b, _ = self._validate_points(points, prompt_indices)
+        if controls.ndim != 2 or controls.shape[0] != b or controls.shape[1] < 1:
+            raise ValueError('hierarchy controls must be nonempty [B,L]')
+        if features is None and self.backbone is not None:
+            source = points if backbone_points is None else backbone_points
+            if source.shape != points.shape:
+                raise ValueError('backbone_points must align with points')
+            features = self.backbone(source)
+        elif features is not None and self.backbone is not None and self.training and not self.freeze_backbone:
+            raise ValueError('A trainable backbone requires raw points, without cached features')
+        enhanced = (self.encode_features(points, features, backbone_points=backbone_points)
+                    if self.encoder_is_control_invariant else None)
+
+        def decode(control):
+            encoded = enhanced if enhanced is not None else self.encode_features(
+                points, features, control, backbone_points)
+            return self.decode_features(encoded, prompt_indices, control, return_aux=True)
+
+        predictions, energies, middle = [], [], []
+        for level in range(controls.shape[1]):
+            pred, aux = decode(controls[:, level])
+            predictions.append(pred)
+            if 'energy' in aux:
+                energies.append(aux['energy'])
+        if compute_midpoints:
+            for level in range(controls.shape[1] - 1):
+                pred, _ = decode((controls[:, level] + controls[:, level + 1]) / 2)
+                middle.append(pred)
+        return {'predictions': torch.stack(predictions, 1),
+                'energies': torch.stack(energies, 1) if energies else None,
+                'middle': torch.stack(middle, 1) if middle else None}
+
+    def forward(self, points, prompt_indices, control=None, features=None, return_aux=False,
+                backbone_points=None, *, controls=None, compute_midpoints=False):
+        if controls is not None:
+            if control is not None:
+                raise ValueError('Supply control or hierarchy controls, not both')
+            return self.forward_hierarchy(points, prompt_indices, controls, features,
+                                          backbone_points, compute_midpoints)
         self._validate_points(points, prompt_indices)
         enhanced = self.encode_features(points, features, control, backbone_points)
         return self.decode_features(enhanced, prompt_indices, control, return_aux)

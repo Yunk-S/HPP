@@ -27,6 +27,12 @@ class OfficialBackbone(nn.Module):
             state = {k.removeprefix('module.').removeprefix('model.'): v for k, v in state.items()}
             self.audit = audit_load(self.model, state, 'official_encoder')
         self.sample = sample_triplane_feat
+        # Reconstruction heads/logit_scale are retained for strict official
+        # checkpoint coverage but are absent from this feature-only forward.
+        # Leave only the two executed modules trainable for unfrozen DDP runs.
+        self.model.requires_grad_(False)
+        self.model.pvcnn.requires_grad_(True)
+        self.model.triplane_transformer.requires_grad_(True)
 
     def forward(self, points):
         features = self.model.pvcnn(points, points)

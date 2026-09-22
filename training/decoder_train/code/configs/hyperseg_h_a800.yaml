@@ -1,6 +1,7 @@
 # High-memory A800 ablation. The main fair-comparison configs use the
 # official-compatible enhancer; this file isolates corrected batch-first
 # attention without changing the HyperSeg-H geometry or loss recipe.
+precision: bf16
 normalization: official-decoder
 backbone_normalization: official-encoder
 prompt_normalization: unit-sphere
